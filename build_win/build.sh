@@ -24,7 +24,13 @@ OBJDIR=build_win/obj
 BINDIR=build_win/bin
 mkdir -p "$OBJDIR" "$BINDIR"
 
-BASE_CFLAGS="-m64 -O3 -Wall -DUSEPOSIXTHREADS -DTHR -DUSEATOMICBARRIERS -D_REENTRANT -Isrc -Idemosrc"
+# -flto lets the optimizer inline/CSE across translation unit boundaries
+# (e.g. the primitive intersectors calling into shade.c/intersect.c).
+# Deliberately no -march=native / -mavx2 / -ffast-math here: this build is
+# meant to run on whatever x86-64 CPU it's copied to, and -ffast-math
+# changes pixel values (unsafe FP reassociation), which fails the
+# byte-identical bar the rest of this optimization work is held to.
+BASE_CFLAGS="-m64 -O3 -flto -Wall -DUSEPOSIXTHREADS -DTHR -DUSEATOMICBARRIERS -D_REENTRANT -Isrc -Idemosrc"
 CFLAGS="$BASE_CFLAGS $*"
 
 LIBSRCS="api apigeom box global hash parallel threads camera render trace grid intersect sphere plane ring triangle cylinder quadric extvol vol ui util vector shade texture coordsys imap light imageio jpeg pngfile ppm psd sgirgb tgafile winbmp"
@@ -45,6 +51,6 @@ for f in $LIBSRCS $DEMOSRCS stub_spaceball; do
   ALLOBJS="$ALLOBJS $OBJDIR/$f.o"
 done
 
-gcc -m64 -O3 $ALLOBJS -o "$BINDIR/tachyon.exe" -lpthread -lm -lws2_32
+gcc -m64 -O3 -flto $ALLOBJS -o "$BINDIR/tachyon.exe" -lpthread -lm -lws2_32
 
 echo "Built $BINDIR/tachyon.exe"
