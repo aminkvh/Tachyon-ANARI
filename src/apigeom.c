@@ -11,7 +11,21 @@
 #include <math.h>
 #include "tachyon.h"
 
-void VNorm(apivector *); /* hack proto, should fix later */
+/* Local normalize for the public apivector type. This used to be a "hack
+ * proto" call straight into the internal VNorm(vector *) -- relying on
+ * apivector and the internal vector struct having identical layout to get
+ * away with the mismatched pointer type. VNorm is now a static inline
+ * defined in vector.h (internal-only, gated behind TACHYON_INTERNAL, which
+ * this API-surface file intentionally does not define), so that no longer
+ * links; do the same three lines of math directly on apivector instead. */
+static void apivector_normalize(apivector * a) {
+  apiflt len = (apiflt) SQRT((a->x * a->x) + (a->y * a->y) + (a->z * a->z));
+  if (len != 0.0) {
+    a->x /= len;
+    a->y /= len;
+    a->z /= len;
+  }
+}
 
 void rt_polycylinder(SceneHandle scene, void * tex, apivector * points, int numpts, flt rad) {
   apivector a;
@@ -152,7 +166,7 @@ static void rt_sheightfield(SceneHandle scene, void * tex, apivector ctr, int m,
         1.0, 
         -(field[addr + m] - field[addr - m]) / (2.0 * yinc));
 
-      VNorm(&normals[addr]);
+      apivector_normalize(&normals[addr]);
     }
   }    
 
