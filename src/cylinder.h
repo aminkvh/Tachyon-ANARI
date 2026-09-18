@@ -17,6 +17,9 @@ typedef struct {
   vector ctr;       /**< starting endpoint of cylinder */
   vector axis;      /**< cylinder axis                 */
   flt rad;
+  vector uaxis;      /**< unit-length axis, precomputed at construction time
+                       *   instead of every fcylinder_intersect() call     */
+  flt axlen;         /**< length of axis, likewise precomputed            */
 } cylinder;
 
 static void cylinder_intersect(const cylinder *, ray *);

@@ -34,9 +34,24 @@ static object_methods fcylinder_methods = {
 };
 
 
+/* Precompute the unit axis and axis length once at construction, instead
+ * of recomputing them (a sqrt+divide and a dot+sqrt) on every single
+ * fcylinder_intersect() call -- this was showing up as ~1/5 of total
+ * render time on cylinder-heavy (molecular bond) scenes. */
+static void cylinder_precompute(cylinder * c) {
+  vector a = c->axis;
+  flt tmp3;
+
+  VDOT(tmp3, a, a);
+  c->axlen = SQRT(tmp3);
+
+  c->uaxis = a;
+  VNorm(&c->uaxis);
+}
+
 object * newcylinder(void * tex, vector ctr, vector axis, flt rad) {
   cylinder * c;
-  
+
   c=(cylinder *) malloc(sizeof(cylinder));
   memset(c, 0, sizeof(cylinder));
   c->methods = &cylinder_methods;
@@ -45,6 +60,7 @@ object * newcylinder(void * tex, vector ctr, vector axis, flt rad) {
   c->ctr=ctr;
   c->axis=axis;
   c->rad=rad;
+  cylinder_precompute(c);
   return (object *) c;
 }
 
@@ -148,6 +164,7 @@ object * newfcylinder(void * tex, vector ctr, vector axis, flt rad) {
   c->ctr=ctr;
   c->axis=axis;
   c->rad=rad;
+  cylinder_precompute(c);
 
   return (object *) c;
 }
@@ -182,9 +199,9 @@ static int fcylinder_bbox(void * obj, vector * min, vector * max) {
 
 
 static void fcylinder_intersect(const cylinder * cyl, ray * ry) {
-  vector rc, n, O, hit, tmp2, ctmp4;
-  flt t, s, tin, tout, ln, d, tmp, tmp3;
- 
+  vector rc, n, O, hit, tmp2;
+  flt t, s, tin, tout, ln, d, tmp;
+
   rc.x = ry->o.x - cyl->ctr.x;  
   rc.y = ry->o.y - cyl->ctr.y;
   rc.z = ry->o.z - cyl->ctr.z;
@@ -219,32 +236,27 @@ static void fcylinder_intersect(const cylinder * cyl, ray * ry) {
     s = FABS(SQRT(cyl->rad*cyl->rad - d*d) / s);
     tin = t - s;
 
-    RAYPNT(hit, (*ry), tin); 
+    RAYPNT(hit, (*ry), tin);
 
-    ctmp4=cyl->axis;
-    VNorm(&ctmp4);
+    tmp2.x = hit.x - cyl->ctr.x;
+    tmp2.y = hit.y - cyl->ctr.y;
+    tmp2.z = hit.z - cyl->ctr.z;
 
-    tmp2.x = hit.x - cyl->ctr.x;   
-    tmp2.y = hit.y - cyl->ctr.y;   
-    tmp2.z = hit.z - cyl->ctr.z;   
+    VDOT(tmp, tmp2, cyl->uaxis);
 
-    VDOT(tmp,  tmp2, ctmp4);
-    VDOT(tmp3, cyl->axis, cyl->axis);
-
-    if ((tmp > 0.0) && (tmp < SQRT(tmp3))) 
+    if ((tmp > 0.0) && (tmp < cyl->axlen))
       ry->add_intersection(tin, (object *) cyl, ry);
     tout = t + s;
 
-    RAYPNT(hit, (*ry), tout); 
+    RAYPNT(hit, (*ry), tout);
 
-    tmp2.x = hit.x - cyl->ctr.x;   
-    tmp2.y = hit.y - cyl->ctr.y;   
-    tmp2.z = hit.z - cyl->ctr.z;   
+    tmp2.x = hit.x - cyl->ctr.x;
+    tmp2.y = hit.y - cyl->ctr.y;
+    tmp2.z = hit.z - cyl->ctr.z;
 
-    VDOT(tmp,  tmp2, ctmp4); 
-    VDOT(tmp3, cyl->axis, cyl->axis);
+    VDOT(tmp, tmp2, cyl->uaxis);
 
-    if ((tmp > 0.0) && (tmp < SQRT(tmp3))) 
+    if ((tmp > 0.0) && (tmp < cyl->axlen))
       ry->add_intersection(tout, (object *) cyl, ry);
   }
 }
