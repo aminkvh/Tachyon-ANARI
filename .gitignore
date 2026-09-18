@@ -1,0 +1,4 @@
+build_win/obj/
+build_win/bin/
+build_win/*.log
+build_win/bench/

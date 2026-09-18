@@ -1,0 +1,50 @@
+#!/bin/sh
+# build.sh - headless Windows/MinGW-w64 build of the Tachyon CLI renderer.
+#
+# There is no upstream win64 target using a modern MinGW toolchain (the
+# unix/Make-arch win32 target is a 1990s Cygwin/egcs recipe), so this is a
+# standalone build script rather than a patch to the autoconf-less unix/
+# Make-* chain. It builds the core ray tracing library plus the demosrc
+# command-line front end (main.c/parse.c/getargs.c/nffparse.c/ac3dparse.c),
+# skipping the pieces that need libraries this box doesn't have:
+#   - libjpeg/libpng (jpeg.c/pngfile.c compile to IMAGEUNSUP stubs without
+#     -DUSEJPEG/-DUSEPNG, so TGA/PPM/PSD/BMP/RGB output still work)
+#   - MGF/OpenGL/X11 (main.c gates these behind USELIBMGF/USEOPENGL)
+#   - spaceball.c/glwin.c interactive OpenGL fly-through mode, replaced by
+#     stub_spaceball.c since it's unreachable from the headless CLI path
+#
+# Usage: run from the Tachyon-dev repo root (git bash / MSYS):
+#   sh build_win/build.sh [extra CFLAGS...]
+# e.g. sh build_win/build.sh -DNDEBUG
+
+set -e
+cd "$(dirname "$0")/.."
+
+OBJDIR=build_win/obj
+BINDIR=build_win/bin
+mkdir -p "$OBJDIR" "$BINDIR"
+
+BASE_CFLAGS="-m64 -O3 -Wall -DUSEPOSIXTHREADS -DTHR -DUSEATOMICBARRIERS -D_REENTRANT -Isrc -Idemosrc"
+CFLAGS="$BASE_CFLAGS $*"
+
+LIBSRCS="api apigeom box global hash parallel threads camera render trace grid intersect sphere plane ring triangle cylinder quadric extvol vol ui util vector shade texture coordsys imap light imageio jpeg pngfile ppm psd sgirgb tgafile winbmp"
+DEMOSRCS="main getargs parse nffparse ac3dparse trackball"
+
+for f in $LIBSRCS; do
+  gcc $CFLAGS -c "src/$f.c" -o "$OBJDIR/$f.o"
+done
+
+for f in $DEMOSRCS; do
+  gcc $CFLAGS -c "demosrc/$f.c" -o "$OBJDIR/$f.o"
+done
+
+gcc $CFLAGS -c build_win/stub_spaceball.c -o "$OBJDIR/stub_spaceball.o"
+
+ALLOBJS=""
+for f in $LIBSRCS $DEMOSRCS stub_spaceball; do
+  ALLOBJS="$ALLOBJS $OBJDIR/$f.o"
+done
+
+gcc -m64 -O3 $ALLOBJS -o "$BINDIR/tachyon.exe" -lpthread -lm -lws2_32
+
+echo "Built $BINDIR/tachyon.exe"

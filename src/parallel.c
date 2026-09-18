@@ -23,6 +23,10 @@
 #include <unistd.h>
 #endif
 
+#if defined(__MINGW32__) || defined(__MINGW64__)
+#include <winsock2.h> /* gethostname() lives here on MinGW, not unistd.h */
+#endif
+
 #ifdef MPI
 #include <mpi.h>
 #endif
