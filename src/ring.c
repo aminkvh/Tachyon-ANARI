@@ -39,6 +39,7 @@ object * newring(void * tex, vector ctr, vector norm, flt inrad, flt outrad) {
   VNorm(&r->norm);
   r->inrad = inrad;
   r->outrad= outrad;
+  r->d = -VDot(&ctr, &r->norm);
 
   return (object *) r;
 }
@@ -57,13 +58,10 @@ static int ring_bbox(void * obj, vector * min, vector * max) {
 }
 
 static void ring_intersect(const ring * rng, ray * ry) {
-  flt d;
   flt t,td;
   vector hit, pnt;
-  
-  d = -VDot(&(rng->ctr), &(rng->norm));
-   
-  t=-(d+VDot(&(rng->norm), &(ry->o)));
+
+  t=-(rng->d+VDot(&(rng->norm), &(ry->o)));
   td=VDot(&(rng->norm),&(ry->d)); 
   if (td != 0.0) {
     t= t / td;

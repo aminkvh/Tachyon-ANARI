@@ -13,7 +13,10 @@ typedef struct {
   vector norm;      /**< surface normal */
   flt inrad;        /**< inner ring radius (0.0 for disk) */
   flt outrad;       /**< outer ring raidus */
-} ring; 
+  flt d;            /**< plane equation constant -dot(ctr,norm), precomputed
+                       *   at construction like plane's (see plane.c) instead
+                       *   of every ring_intersect() call */
+} ring;
 
 static int ring_bbox(void * obj, vector * min, vector * max);
 static void ring_intersect(const ring *, ray *);
