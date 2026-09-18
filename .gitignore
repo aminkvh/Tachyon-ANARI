@@ -10,3 +10,5 @@ build_win/prof/out/
 build_win/prof/*.log
 build_wsl/prof/
 scenes/stress_clusters.dat
+build_win/sidebyside/*.ppm
+build_win/sidebyside/*.png
