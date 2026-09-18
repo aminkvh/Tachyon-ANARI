@@ -608,26 +608,38 @@ void jitter_disc2f(unsigned int *pval, float *dir) {
   dir[1] = dy;
 }
 
-/* Generate a randomly oriented ray */
+/* Generate a randomly oriented ray, uniformly distributed over the unit
+ * sphere, using Marsaglia's (1972) method: reject-sample a point uniform
+ * in the unit disk, then map it onto the sphere.
+ *
+ * This used to reject-sample a point in the unit cube instead (throwing
+ * out anything outside the inscribed sphere). Rejecting in 2D rather than
+ * 3D has a much higher acceptance rate (pi/4 =~ 78.5% vs (4/3)*pi*0.5^3
+ * =~ 52.4%) and costs 2 RNG calls per attempt instead of 3, so the
+ * expected RNG calls per accepted sample drops from ~5.7 to ~2.5 -- this
+ * was 13-17% of total render time on ambient-occlusion-heavy scenes.
+ *
+ * Both methods produce the same uniform distribution on the sphere, so
+ * AO quality/convergence is unchanged, but the exact sequence of
+ * accept/reject decisions differs from before, so output is no longer
+ * byte-identical to the previous implementation -- a different (not
+ * better or worse) noise pattern for the same random seed. Verified by
+ * comparing converged (high sample count) renders' mean/variance rather
+ * than a pixel diff; see build_win/bench_ao_convergence.sh.
+ */
 void jitter_sphere3f(rng_frand_handle *rngh, float *dir) {
-  float dx, dy, dz, len, invlen;
-  /* In order to correctly sample a sphere, using rays    */
-  /* generated randomly within a cube we must throw out   */
-  /* direction vectors longer than 1.0, otherwise we'll   */
-  /* oversample the corners of the cube relative to       */
-  /* a true sphere.                                       */
-  do {
-    dx = rng_frand(rngh) - 0.5f;
-    dy = rng_frand(rngh) - 0.5f;
-    dz = rng_frand(rngh) - 0.5f;
-    len = dx*dx + dy*dy + dz*dz;
-  } while (len > 0.250f);
-  invlen = 1.0f / sqrt(len);
+  float u1, u2, s, scale;
 
-  /* finish normalizing the direction vector */
-  dir[0] = dx * invlen;
-  dir[1] = dy * invlen;
-  dir[2] = dz * invlen;
+  do {
+    u1 = 2.0f * rng_frand(rngh) - 1.0f;
+    u2 = 2.0f * rng_frand(rngh) - 1.0f;
+    s = u1*u1 + u2*u2;
+  } while (s >= 1.0f);
+
+  scale = 2.0f * sqrtf(1.0f - s);
+  dir[0] = u1 * scale;
+  dir[1] = u2 * scale;
+  dir[2] = 1.0f - 2.0f * s;
 }
 
 
