@@ -341,6 +341,20 @@ void rt_shadow_filtering(SceneHandle, int mode);
 #define RT_BOUNDING_DISABLED 0  /**< Disable spatial subdivision/bounding  */
 #define RT_BOUNDING_ENABLED  1  /**< Enable spatial subdivision/bounding   */
 
+/*
+ * Which acceleration structure rt_boundmode()'s RT_BOUNDING_ENABLED builds.
+ * Grid (grid.c, a uniform grid with adaptive per-cell subdivision) is the
+ * default; BVH (bvh.c, binned-SAH bounding volume hierarchy with an SSE2
+ * traversal) wins on illumination/mesh-heavy scenes (ambient occlusion,
+ * tessellated triangles) but loses on dense-sphere molecular scenes --
+ * Tachyon's primary real-world workload in VMD -- so it isn't the default.
+ * See the git history around when bvh.c was added for the benchmark table.
+ * Set scenedef.accelstruct directly (see rt_newscene() in api.c) to change
+ * the default for your own workload; there's no runtime/CLI switch for it.
+ */
+#define RT_ACCEL_GRID 0
+#define RT_ACCEL_BVH  1
+
 /**
  * Enables or disable automatic generation and use of ray tracing 
  * acceleration data structures. 
@@ -1087,6 +1101,7 @@ typedef struct {
   int verbosemode;           /**< verbose reporting flag                  */
   int boundmode;             /**< automatic spatial subdivision flag      */
   int boundthresh;           /**< threshold number of subobjects          */
+  int accelstruct;           /**< RT_ACCEL_GRID or RT_ACCEL_BVH           */
   list * texlist;            /**< linked list of texture objects          */
   list * cliplist;           /**< linked list of clipping plane groups    */
   unsigned int flags;        /**< scene feature requirement flags         */

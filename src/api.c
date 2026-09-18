@@ -553,6 +553,7 @@ SceneHandle rt_newscene(void) {
 
   rt_boundmode(voidscene, RT_BOUNDING_ENABLED);   /* spatial subdivision on */
   rt_boundthresh(voidscene, BOUNDTHRESH);         /* default threshold      */
+  scene->accelstruct = RT_ACCEL_GRID;             /* see tachyon.h for why  */
   rt_camera_setup(voidscene, 1.0, 1.0, 0, 6,
                   rt_vector(0.0, 0.0, 0.0),
                   rt_vector(0.0, 0.0, 1.0),

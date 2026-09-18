@@ -21,6 +21,7 @@
 #include "shade.h"
 #include "ui.h"
 #include "grid.h"
+#include "bvh.h"
 #include "camera.h"
 #include "intersect.h"
 
@@ -258,9 +259,17 @@ static void rendercheck(scenedef * scene) {
   rt_timer_start(stth);  /* Time the preprocessing of the scene database    */
   rt_autoshader(scene);  /* Adapt to the shading features needed at runtime */
 
-  /* Hierarchical grid ray tracing acceleration scheme */
-  if (scene->boundmode == RT_BOUNDING_ENABLED) 
-    engrid_scene(scene, scene->boundthresh); 
+  /* Acceleration structure: grid.c's uniform grid by default, or bvh.c's
+   * SAH-BVH if scene->accelstruct was set to RT_ACCEL_BVH (see tachyon.h
+   * for which scenes each one wins on -- it's workload-dependent, not a
+   * strict upgrade either way). */
+  if (scene->boundmode == RT_BOUNDING_ENABLED) {
+    if (scene->accelstruct == RT_ACCEL_BVH) {
+      buildbvh_scene(scene);
+    } else {
+      engrid_scene(scene, scene->boundthresh);
+    }
+  }
 
   /* if any clipping groups exist, we have to use appropriate */
   /* intersection testing logic                               */

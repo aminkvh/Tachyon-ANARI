@@ -33,7 +33,7 @@ mkdir -p "$OBJDIR" "$BINDIR"
 BASE_CFLAGS="-m64 -O3 -flto -Wall -DUSEPOSIXTHREADS -DTHR -DUSEATOMICBARRIERS -D_REENTRANT -Isrc -Idemosrc"
 CFLAGS="$BASE_CFLAGS $*"
 
-LIBSRCS="api apigeom box global hash parallel threads camera render trace grid intersect sphere plane ring triangle cylinder quadric extvol vol ui util vector shade texture coordsys imap light imageio jpeg pngfile ppm psd sgirgb tgafile winbmp"
+LIBSRCS="api apigeom box global hash parallel threads camera render trace grid bvh intersect sphere plane ring triangle cylinder quadric extvol vol ui util vector shade texture coordsys imap light imageio jpeg pngfile ppm psd sgirgb tgafile winbmp"
 DEMOSRCS="main getargs parse nffparse ac3dparse trackball"
 
 for f in $LIBSRCS; do

@@ -3,7 +3,7 @@ set -e
 cd "$(dirname "$0")/.."
 mkdir -p build_wsl/prof/obj build_wsl/prof/bin build_wsl/prof/out
 CFLAGS="-m64 -O2 -pg -g -Wall -DTHR -DUSEATOMICBARRIERS -D_REENTRANT -Isrc -Idemosrc -DLinux"
-LIBSRCS="api apigeom box global hash parallel threads camera render trace grid intersect sphere plane ring triangle cylinder quadric extvol vol ui util vector shade texture coordsys imap light imageio jpeg pngfile ppm psd sgirgb tgafile winbmp"
+LIBSRCS="api apigeom box global hash parallel threads camera render trace grid bvh intersect sphere plane ring triangle cylinder quadric extvol vol ui util vector shade texture coordsys imap light imageio jpeg pngfile ppm psd sgirgb tgafile winbmp"
 DEMOSRCS="main getargs parse nffparse ac3dparse trackball"
 
 for f in $LIBSRCS; do
