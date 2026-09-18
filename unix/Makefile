@@ -225,6 +225,7 @@ RAYOBJS= ${OBJDIR}/api.o \
 	${OBJDIR}/render.o \
 	${OBJDIR}/trace.o \
 	${OBJDIR}/grid.o \
+	${OBJDIR}/bvh.o \
 	${OBJDIR}/intersect.o \
 	${OBJDIR}/sphere.o \
 	${OBJDIR}/plane.o \
@@ -342,6 +343,9 @@ ${OBJDIR}/imap.o : ${SRCDIR}/imap.c ${OBJDEPS}
 
 ${OBJDIR}/grid.o : ${SRCDIR}/grid.c ${SRCDIR}/grid.h ${OBJDEPS}
 	${CC} ${CFLAGS} -c ${SRCDIR}/grid.c -o ${OBJDIR}/grid.o
+
+${OBJDIR}/bvh.o : ${SRCDIR}/bvh.c ${SRCDIR}/bvh.h ${OBJDEPS}
+	${CC} ${CFLAGS} -c ${SRCDIR}/bvh.c -o ${OBJDIR}/bvh.o
 
 ${OBJDIR}/global.o : ${SRCDIR}/global.c ${OBJDEPS}
 	${CC} ${CFLAGS} -c ${SRCDIR}/global.c -o ${OBJDIR}/global.o
