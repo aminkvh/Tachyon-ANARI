@@ -1,4 +1,13 @@
 build_win/obj/
 build_win/bin/
+build_win/bin_old/
+build_win/bin_new/
 build_win/*.log
 build_win/bench/
+build_win/prof/obj/
+build_win/prof/bin/
+build_win/prof/out/
+build_win/prof/*.log
+build_wsl/prof/obj/
+build_wsl/prof/bin/
+build_wsl/prof/out/

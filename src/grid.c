@@ -58,8 +58,8 @@ object * newgrid(scenedef * scene, int xsize, int ysize, int zsize, vector min, 
   g->voxsize.y /= (flt) g->ysize; 
   g->voxsize.z /= (flt) g->zsize; 
 
-  g->cells = (objectlist **) malloc(numcells * sizeof(objectlist *));
-  memset(g->cells, 0, numcells * sizeof(objectlist *));
+  g->buildcells = (objectlist **) malloc(numcells * sizeof(objectlist *));
+  memset(g->buildcells, 0, numcells * sizeof(objectlist *));
 
   return (object *) g;
 }
@@ -77,28 +77,74 @@ static void grid_free(void * v) {
   int i, numvoxels;
   grid * g = (grid *) v;
 
-  /* loop through all voxels and free the object lists */
-  numvoxels = g->xsize * g->ysize * g->zsize; 
-  for (i=0; i<numvoxels; i++) {
-    objectlist * lcur;
-    objectlist * lnext;
+  /* buildcells should always have been released by grid_freeze() by the
+   * time we get here, but tear it down defensively just in case. */
+  if (g->buildcells != NULL) {
+    numvoxels = g->xsize * g->ysize * g->zsize;
+    for (i=0; i<numvoxels; i++) {
+      objectlist * lcur;
+      objectlist * lnext;
 
-    lcur = g->cells[i];
-    while (lcur != NULL) {
-      lnext = lcur->next;
-      free(lcur);
-      lcur = lnext;
+      lcur = g->buildcells[i];
+      while (lcur != NULL) {
+        lnext = lcur->next;
+        free(lcur);
+        lcur = lnext;
+      }
     }
+    free(g->buildcells);
   }
 
-  /* free the grid cells */ 
-  free(g->cells);
+  /* free the flattened grid cells */
+  free(g->cellobjs);
+  free(g->cellstart);
 
   /* free all objects on the grid object list */
-  free_objects(g->objects);   
+  free_objects(g->objects);
 
   free(g);
 }
+
+/* Convert a fully-populated grid's per-cell linked lists (buildcells) into
+ * flat CSR arrays (cellstart/cellobjs) and release the linked list nodes.
+ * Must only be called once a grid's cell contents are final -- for the top
+ * level grid that's after all of its cells have been through engrid_cell()
+ * (which may replace many entries with a single subgrid), and for a
+ * subgrid, right after it's been populated by engrid_objectlist(). */
+static void grid_freeze(grid * g) {
+  int numcells = g->xsize * g->ysize * g->zsize;
+  int i, idx, total;
+  objectlist * cur, * next;
+
+  g->cellstart = (int *) malloc((numcells + 1) * sizeof(int));
+
+  total = 0;
+  for (i=0; i<numcells; i++) {
+    int cnt = 0;
+    for (cur = g->buildcells[i]; cur != NULL; cur = cur->next)
+      cnt++;
+    g->cellstart[i] = total;
+    total += cnt;
+  }
+  g->cellstart[numcells] = total;
+
+  g->cellobjs = (total > 0) ? (object **) malloc(total * sizeof(object *)) : NULL;
+
+  for (i=0; i<numcells; i++) {
+    idx = g->cellstart[i];
+    cur = g->buildcells[i];
+    while (cur != NULL) {
+      next = cur->next;
+      g->cellobjs[idx++] = cur->obj;
+      free(cur);
+      cur = next;
+    }
+  }
+
+  free(g->buildcells);
+  g->buildcells = NULL;
+}
+
 
 static void globalbound(object ** rootlist, vector * gmin, vector * gmax) {
   vector min, max;
@@ -135,7 +181,7 @@ static int cellbound(const grid *g, const gridindex *index, vector * cmin, vecto
   objectlist * cur;
   int numinbounds = 0;
 
-  cur = g->cells[index->z*g->xsize*g->ysize + index->y*g->xsize + index->x]; 
+  cur = g->buildcells[index->z*g->xsize*g->ysize + index->y*g->xsize + index->x];
 
   if (cur == NULL)  /* don't bound non-existant objects */
     return 0;
@@ -272,7 +318,10 @@ int engrid_scene(scenedef * scene, int boundthresh) {
           engrid_cell(scene, boundthresh, g, &index);
         }
       }
-    } 
+    }
+
+    /* cell contents are now final -- flatten for fast traversal */
+    grid_freeze(g);
   }
 
   return 1;
@@ -315,7 +364,7 @@ static int engrid_cell(scenedef * scene, int boundthresh, grid * gold, gridindex
   objectlist * newobj;
   int numsucceeded;
 
-  list = &gold->cells[index->z*gold->xsize*gold->ysize + 
+  list = &gold->buildcells[index->z*gold->xsize*gold->ysize +
                      index->y*gold->xsize  + index->x];
 
   if (*list == NULL)
@@ -342,8 +391,12 @@ static int engrid_cell(scenedef * scene, int boundthresh, grid * gold, gridindex
     g = (grid *) newgrid(scene, xs, ys, zs, gmin, gmax);
     numsucceeded = engrid_objectlist(g, list);
 
+    /* this subgrid is never subdivided further -- its cells are already
+     * final, so flatten it now */
+    grid_freeze(g);
+
     if (scene->verbosemode && scene->mynode == 0)
-      gridstats(xs, ys, zs, numsucceeded); 
+      gridstats(xs, ys, zs, numsucceeded);
 
     newobj = (objectlist *) malloc(sizeof(objectlist));    
     newobj->obj = (object *) g;
@@ -427,11 +480,11 @@ static int engrid_object(grid * g, object * obj, int addtolist) {
     for (y=low.y; y<=high.y; y++) {
       yindex = y * g->xsize;
       for (x=low.x; x<=high.x; x++) {
-        voxindex = x + yindex + zindex; 
+        voxindex = x + yindex + zindex;
         tmp = (objectlist *) malloc(sizeof(objectlist));
-        tmp->next = g->cells[voxindex];
+        tmp->next = g->buildcells[voxindex];
         tmp->obj = obj;
-        g->cells[voxindex] = tmp;
+        g->buildcells[voxindex] = tmp;
       }
     }
   }
@@ -466,17 +519,37 @@ static int pos2grid(grid * g, vector * pos, gridindex * index) {
 }
 
 
+/* Test every object in one voxel's flattened cell array against the ray.
+ * Cell contents are a contiguous object* array (see grid_freeze()), so
+ * this is a straight-line scan rather than a linked-list walk. */
+static void grid_test_cell(const grid * g, int voxindex, ray * ry, unsigned long serial) {
+  object ** cur = &g->cellobjs[g->cellstart[voxindex]];
+  object ** end = &g->cellobjs[g->cellstart[voxindex + 1]];
+#if !defined(DISABLEMBOX)
+  unsigned long * mbox = ry->mbox;
+#endif
+
+  while (cur < end) {
+    object * obj = *cur++;
+#if !defined(DISABLEMBOX)
+    if (mbox[obj->id] != serial) {
+      mbox[obj->id] = serial;
+      obj->methods->intersect(obj, ry);
+    }
+#else
+    obj->methods->intersect(obj, ry);
+#endif
+  }
+}
+
+
 /* the real thing */
 static void grid_intersect(const grid * g, ray * ry) {
   flt tnear, tfar;
   vector curpos, tmax, tdelta;
-  gridindex curvox, step, out; 
+  gridindex curvox, step, out;
   int voxindex, SY, SZ;
   unsigned long serial;
-#if !defined(DISABLEMBOX)
-  unsigned long * mbox;
-#endif
-  objectlist * cur;
 
   if (ry->flags & RT_RAY_FINISHED)
     return;
@@ -488,11 +561,8 @@ static void grid_intersect(const grid * g, ray * ry) {
     return;
   
   serial=ry->serial;
-#if !defined(DISABLEMBOX)
-  mbox=ry->mbox;
-#endif
 
-  /* find the entry point in the grid from the near hit */ 
+  /* find the entry point in the grid from the near hit */
   curpos.x = ry->o.x + (ry->d.x * tnear);
   curpos.y = ry->o.y + (ry->d.y * tnear);
   curpos.z = ry->o.z + (ry->d.z * tnear);
@@ -568,18 +638,7 @@ static void grid_intersect(const grid * g, ray * ry) {
 
   /* Unrolled while loop by one... */
   /* Test all objects in the current cell for intersection */
-  cur = g->cells[voxindex];
-  while (cur != NULL) {
-#if !defined(DISABLEMBOX)
-    if (mbox[cur->obj->id] != serial) {
-      mbox[cur->obj->id] = serial; 
-      cur->obj->methods->intersect(cur->obj, ry);
-    }
-#else
-    cur->obj->methods->intersect(cur->obj, ry);
-#endif
-    cur = cur->next;
-  }
+  grid_test_cell(g, voxindex, ry, serial);
 
   /* Loop through grid cells until we're done */
   while (!(ry->flags & RT_RAY_FINISHED)) {
@@ -607,18 +666,7 @@ static void grid_intersect(const grid * g, ray * ry) {
     }
 
     /* Test all objects in the current cell for intersection */
-    cur = g->cells[voxindex];
-    while (cur != NULL) {
-#if !defined(DISABLEMBOX)
-      if (mbox[cur->obj->id] != serial) {
-        mbox[cur->obj->id] = serial; 
-        cur->obj->methods->intersect(cur->obj, ry);
-      }
-#else
-      cur->obj->methods->intersect(cur->obj, ry);
-#endif
-      cur = cur->next;
-    }
+    grid_test_cell(g, voxindex, ry, serial);
   }
 }
 
