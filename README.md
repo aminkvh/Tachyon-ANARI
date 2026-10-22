@@ -15,6 +15,27 @@ All credit for Tachyon goes to John Stone. This fork adds performance work on to
 
 Output is byte-identical to stock on the test scenes, except for ambient-occlusion scenes, whose noise pattern differs (statistically equivalent) because of the new sampler. Speedups were measured on one Windows machine; see the git history for details. Build on Windows (MSYS2/MinGW), Linux or macOS with `sh build_win/build.sh`, or download binaries from the Releases page.
 
+## ANARI device (experimental)
+
+Tachyon can also be used as a [Khronos ANARI](https://www.khronos.org/anari) rendering device, so ANARI applications can render with it. It is a small CPU-only library: under 0.5 MB on Linux, and it needs nothing beyond the ANARI SDK. It currently supports:
+
+- triangle meshes
+- perspective and orthographic cameras
+- `matte` materials, plus `physicallyBased` (approximated)
+- directional and point lights
+- color and depth output
+
+Other geometry types are skipped with a warning.
+
+Build it against [ANARI-SDK](https://github.com/KhronosGroup/ANARI-SDK) 0.16:
+
+```sh
+cmake -S . -B build -DTACHYON_BUILD_ANARI=ON -DCMAKE_PREFIX_PATH=<anari-sdk install>
+cmake --build build
+```
+
+Load it from an application with `anariLoadLibrary("tachyon", ...)`, or set `ANARI_LIBRARY=tachyon` for tools that read that variable. Make sure the library directory is on the loader search path.
+
 ```$Id: README,v 1.28 2013/04/21 19:32:42 johns Exp $```
 
 ## README for Tachyon(tm) Parallel/Multiprocessor Ray Tracing Software
