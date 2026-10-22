@@ -136,11 +136,13 @@ jobs:
           set +e
           cmake --build deps/anari-sdk/build --parallel -- -k 0 > sdk-build.log 2>&1
           set -e
-          # On Windows/MinGW the SDK's anariCts tool fails to link (undefined
-          # anari::scenes::colors::palette). It is not needed here, and it is
-          # not installed, so tolerate only that target on Windows.
+          # On Windows/MinGW the SDK's CTS test executables (anariCts,
+          # anariCatalogTests) fail to link (undefined
+          # anari::scenes::colors::palette in anari_cts_core). Neither is needed
+          # by the device or anariRenderTests, and neither is installed, so
+          # tolerate only those two targets on Windows.
           if [ "$RUNNER_OS" = "Windows" ]; then
-            failed=$(grep '^FAILED:' sdk-build.log | grep -v 'anariCts' || true)
+            failed=$(grep '^FAILED:' sdk-build.log | grep -v -E 'anariCts|anariCatalogTests' || true)
           else
             failed=$(grep '^FAILED:' sdk-build.log || true)
           fi
