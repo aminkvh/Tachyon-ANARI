@@ -275,7 +275,7 @@ color scalar_volume_texture(const vector * hit, const texture * tx, ray * ry) {
 void LoadVol(scalarvol * vol) { 
   FILE * dfile;
  
-  dfile=fopen(vol->name, "r");
+  dfile=fopen(vol->name, "rb");
   if (dfile==NULL) {
     char msgtxt[2048];
     sprintf(msgtxt, "Can't load volume %s, using object color", vol->name); 

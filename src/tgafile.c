@@ -180,7 +180,7 @@ int readtga(char * name, int * xres, int * yres, unsigned char **imgdata) {
   int imgsize, bytesread, i, tmp;
   FILE * ifp;
 
-  ifp=fopen(name, "r");  
+  ifp=fopen(name, "rb");  
   if (ifp==NULL) {
     return IMAGEBADFILE; /* couldn't open the file */
   }
@@ -215,7 +215,7 @@ int readtga(char * name, int * xres, int * yres, unsigned char **imgdata) {
   height = ((h2 << 8) | h1);
 
   imgsize = 3 * width * height;
-  *imgdata = malloc(imgsize);
+  *imgdata = calloc(1, imgsize); /* zeroed: a short read leaves no garbage */
   bytesread = fread(*imgdata, 1, imgsize, ifp);
   fclose(ifp);
 

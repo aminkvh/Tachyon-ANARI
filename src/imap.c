@@ -365,24 +365,38 @@ color MIPMap(const mipmap * mip, flt u, flt v, flt d) {
 }
 
 
+/* clamp a lookup coordinate to [0,1]; NaN is mapped to 0 */
+static flt ClampUnit(flt t) {
+  if (!(t >= 0.0)) return 0.0;
+  if (t > 1.0) return 1.0;
+  return t;
+}
+
 color ImageMap(const rawimage * image, flt u, flt v) {
   color col, colx, colx2;
   flt x, y, px, py;
   int ix, iy, nx, ny;
   unsigned char * ptr;
 
+  /* keep the lookup inside the image, callers may pass stray values */
+  u = ClampUnit(u);
+  v = ClampUnit(v);
+
   /*
    *  Perform bilinear interpolation between 4 closest pixels.
+   *  The neighbour offsets are zero on the last column/row so the reads
+   *  never leave the image data.  There the fractional offset is exactly
+   *  zero, so the result is the same as reading the real neighbour.
    */
-  nx = (image->xres > 1) ? 3 : 0;
   x = (image->xres - 1.0) * u; /* floating point X location */
   ix = (int) x;                /* integer X location        */
   px = x - ix;                 /* fractional X location     */
+  nx = (image->xres > 1 && ix < image->xres - 1) ? 3 : 0;
 
-  ny = (image->yres > 1) ? image->xres * 3 : 0;
   y = (image->yres - 1.0) * v; /* floating point Y location */
   iy = (int) y;                /* integer Y location        */
   py = y - iy;                 /* fractional Y location     */
+  ny = (image->yres > 1 && iy < image->yres - 1) ? image->xres * 3 : 0;
 
   /* pointer to the left lower pixel */
   ptr  = image->data + ((image->xres * iy) + ix) * 3; 
@@ -415,6 +429,11 @@ color VolImageMapNearest(const rawimage * img, flt u, flt v, flt w) {
   int ix, iy, iz;
   int addr;
 
+  /* keep the lookup inside the volume, callers may pass stray values */
+  u = ClampUnit(u);
+  v = ClampUnit(v);
+  w = ClampUnit(w);
+
   x = (img->xres - 1.0) * u;  /* floating point X location */
   ix = (int) x;
   y = (img->yres - 1.0) * v;  /* floating point Y location */
@@ -438,23 +457,30 @@ color VolImageMapTrilinear(const rawimage * img, flt u, flt v, flt w) {
   unsigned char *llptr, *ulptr, *LLptr, *ULptr;
   int addr;
 
+  /* keep the lookup inside the volume, callers may pass stray values */
+  u = ClampUnit(u);
+  v = ClampUnit(v);
+  w = ClampUnit(w);
+
   /*
    *  Perform trilinear interpolation between 8 closest pixels.
+   *  As in ImageMap(), a neighbour offset is zero on the last column,
+   *  row or slice, where its fractional offset is exactly zero.
    */
-  nx = (img->xres > 1) ? 3 : 0;
   x = (img->xres - 1.0) * u;  /* floating point X location */
   ix = (int) x;               /* integer X location        */
   px = x - ix;                /* fractional X location     */
+  nx = (img->xres > 1 && ix < img->xres - 1) ? 3 : 0;
 
-  ny = (img->yres > 1) ? (img->xres * 3) : 0;
   y = (img->yres - 1.0) * v;  /* floating point Y location */
   iy = (int) y;               /* integer Y location        */
   py = y - iy;                /* fractional Y location     */
+  ny = (img->yres > 1 && iy < img->yres - 1) ? (img->xres * 3) : 0;
 
-  nz = (img->zres > 1) ? (img->xres * img->yres * 3) : 0;
   z = (img->zres - 1.0) * w;  /* floating point Z location */
   iz = (int) z;               /* integer Z location        */
   pz = z - iz;                /* fractional Z location     */
+  nz = (img->zres > 1 && iz < img->zres - 1) ? (img->xres * img->yres * 3) : 0;
 
   addr = ((img->xres*img->yres * iz) + (img->xres * iy) + ix) * 3; 
 

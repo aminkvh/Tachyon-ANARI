@@ -41,7 +41,7 @@ int readppm(const char * name, int * xres, int * yres, unsigned char **imgdata) 
   int i, bytesread, cnt;
   int datasize;
  
-  ifp=fopen(name, "r");  
+  ifp=fopen(name, "rb");  
   if (ifp==NULL) {
     return IMAGEBADFILE; /* couldn't open the file */
   }
@@ -65,7 +65,7 @@ int readppm(const char * name, int * xres, int * yres, unsigned char **imgdata) 
 
   datasize = 3 * (*xres) * (*yres);
 
-  *imgdata=malloc(datasize); 
+  *imgdata=calloc(1, datasize); /* zeroed: a short read leaves no garbage */ 
 
   bytesread=fread(*imgdata, 1, datasize, ifp);   
 
