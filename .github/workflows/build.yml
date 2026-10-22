@@ -127,7 +127,7 @@ jobs:
           # SDK 0.16.0 bug: the palette variable lacks its export macro, so the
           # CTS tools fail to link against the test-scenes DLL on Windows.
           hdr=deps/anari-sdk/src/src/anari_test_scenes/generators/ColorPalette.h
-          sed -i 's/^extern const std::vector<anari::math::float3> palette;/ANARI_TEST_SCENES_INTERFACE extern const std::vector<anari::math::float3> palette;/' "$hdr"
+          sed -i.bak 's/^extern const std::vector<anari::math::float3> palette;/ANARI_TEST_SCENES_INTERFACE extern const std::vector<anari::math::float3> palette;/' "$hdr"
           grep -q '^ANARI_TEST_SCENES_INTERFACE extern' "$hdr"
           cmake -S deps/anari-sdk/src -B deps/anari-sdk/build -G Ninja \
             -DCMAKE_BUILD_TYPE=Release \
