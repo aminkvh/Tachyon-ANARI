@@ -110,7 +110,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: deps/anari-sdk/install
-          key: anari-sdk-${{ env.ANARI_SDK_REF }}-${{ matrix.os }}-v1
+          key: anari-sdk-${{ env.ANARI_SDK_REF }}-${{ matrix.os }}-v2
 
       - name: Fetch ANARI-SDK source
         if: steps.sdk-cache.outputs.cache-hit != 'true'
@@ -124,6 +124,11 @@ jobs:
       - name: Build and install ANARI-SDK
         if: steps.sdk-cache.outputs.cache-hit != 'true'
         run: |
+          # SDK 0.16.0 bug: the palette variable lacks its export macro, so the
+          # CTS tools fail to link against the test-scenes DLL on Windows.
+          hdr=deps/anari-sdk/src/src/anari_test_scenes/generators/ColorPalette.h
+          sed -i 's/^extern const std::vector<anari::math::float3> palette;/ANARI_TEST_SCENES_INTERFACE extern const std::vector<anari::math::float3> palette;/' "$hdr"
+          grep -q '^ANARI_TEST_SCENES_INTERFACE extern' "$hdr"
           cmake -S deps/anari-sdk/src -B deps/anari-sdk/build -G Ninja \
             -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_INSTALL_PREFIX="$ANARI_PREFIX" \
@@ -132,25 +137,7 @@ jobs:
             -DBUILD_EXAMPLES=OFF \
             -DBUILD_CTS=OFF \
             -DBUILD_VIEWER=OFF
-          # Keep going past failures so every other target is still built.
-          set +e
-          cmake --build deps/anari-sdk/build --parallel -- -k 0 > sdk-build.log 2>&1
-          set -e
-          # On Windows/MinGW the SDK's CTS test executables (anariCts,
-          # anariCatalogTests) fail to link (undefined
-          # anari::scenes::colors::palette in anari_cts_core). Neither is needed
-          # by the device or anariRenderTests, and neither is installed, so
-          # tolerate only those two targets on Windows.
-          if [ "$RUNNER_OS" = "Windows" ]; then
-            failed=$(grep '^FAILED:' sdk-build.log | grep -v -E 'anariCts|anariCatalogTests' || true)
-          else
-            failed=$(grep '^FAILED:' sdk-build.log || true)
-          fi
-          if [ -n "$failed" ]; then
-            tail -n 80 sdk-build.log
-            echo "$failed"
-            exit 1
-          fi
+          cmake --build deps/anari-sdk/build --parallel
           cmake --install deps/anari-sdk/build
 
       - name: Build tachyon ANARI device
