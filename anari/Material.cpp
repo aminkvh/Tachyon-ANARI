@@ -20,6 +20,23 @@ Material *Material::createInstance(
   return nullptr; // caller creates an UnsupportedMaterial
 }
 
+int Material::readAttributeName(const char *name)
+{
+  const std::string attr = getParamString(name, "none");
+  if (attr == "none" || attr.empty())
+    return -1;
+  if (attr == "color")
+    return 4;
+  if (attr.size() == 10 && attr.compare(0, 9, "attribute") == 0
+      && attr[9] >= '0' && attr[9] <= '3')
+    return attr[9] - '0';
+  reportMessage(ANARI_SEVERITY_WARNING,
+      "'%s' attribute '%s' not supported, using the constant value",
+      name,
+      attr.c_str());
+  return -1;
+}
+
 void Material::commitParameters()
 {
   const std::string mode = getParamString("alphaMode", "opaque");
@@ -28,6 +45,9 @@ void Material::commitParameters()
       : (mode == "mask" ? AlphaMode::MASK : AlphaMode::OPAQUE_);
   m_alphaCutoff = getParam<float>("alphaCutoff", 0.5f);
   m_opacity = getParam<float>("opacity", 1.f);
+  m_opacityAttribute = readAttributeName("opacity");
+  m_metallicAttribute = -1;
+  m_roughnessAttribute = -1;
 }
 
 void Material::readCommon(const char *colorName)
@@ -61,15 +81,17 @@ void Material::readCommon(const char *colorName)
   }
 }
 
-bool Material::fillStyle(SurfaceStyle &s, float colorAlpha) const
+bool Material::fillStyle(
+    SurfaceStyle &s, float colorAlpha, const Scalars *sc) const
 {
+  const Scalars v = sc ? *sc : scalars();
   if (m_colorAttribute < 0) {
     s.color[0] = m_color.x;
     s.color[1] = m_color.y;
     s.color[2] = m_color.z;
   }
 
-  float alpha = m_opacity * colorAlpha;
+  float alpha = v.opacity * colorAlpha;
   switch (m_alphaMode) {
   case AlphaMode::OPAQUE_:
     alpha = 1.f;
@@ -85,8 +107,8 @@ bool Material::fillStyle(SurfaceStyle &s, float colorAlpha) const
   if (m_pbr) {
     // Rough approximation: metals lose diffuse reflection and gain a tinted
     // highlight; rough surfaces get a wide, weak highlight.
-    const float m = std::clamp(m_metallic, 0.f, 1.f);
-    const float r = std::clamp(m_roughness, 0.f, 1.f);
+    const float m = std::clamp(v.metallic, 0.f, 1.f);
+    const float r = std::clamp(v.roughness, 0.f, 1.f);
     s.diffuse = 1.f - 0.7f * m;
     s.phong = (0.2f + 0.7f * m) * (1.f - 0.7f * r);
     s.phongExp = std::clamp(2.f / (r * r + 0.002f), 4.f, 400.f);
@@ -108,6 +130,8 @@ void PhysicallyBased::commitParameters()
   m_pbr = true;
   m_metallic = getParam<float>("metallic", 1.f);
   m_roughness = getParam<float>("roughness", 1.f);
+  m_metallicAttribute = readAttributeName("metallic");
+  m_roughnessAttribute = readAttributeName("roughness");
   readCommon("baseColor");
 }
 

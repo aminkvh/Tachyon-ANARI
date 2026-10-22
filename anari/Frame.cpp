@@ -7,8 +7,11 @@
 #include <algorithm>
 #include <chrono>
 #include <cstring>
+#include <cmath>
 #include <limits>
+#include <memory>
 #include <mutex>
+#include <unordered_map>
 
 namespace tachyon_anari {
 
@@ -19,6 +22,54 @@ static std::mutex &tachyonMutex()
   static std::mutex m;
   return m;
 }
+
+// Styles for material scalars (opacity, metallic, roughness) that come from
+// per-vertex or per-primitive attributes: the values are quantized to 16
+// levels and one style is created per distinct combination, so memory stays
+// bounded by the number of combinations (at most 16^3), not the number of
+// primitives.
+namespace {
+struct AttributeStyleBinder : public PrimStyleBinder
+{
+  static constexpr int kLevels = 15;
+
+  TachyonScene *scene{nullptr};
+  const Material *material{nullptr};
+  SurfaceStyle baseStyle;
+  float colorAlpha{1.f};
+  Material::Scalars scalars{};
+  int attr[3]{-1, -1, -1}; // opacity, metallic, roughness: attribute or -1
+  std::unordered_map<unsigned, int> cache;
+
+  static unsigned level(float v)
+  {
+    if (!(v > 0.f))
+      return 0;
+    return v >= 1.f ? kLevels : unsigned(std::lround(v * kLevels));
+  }
+
+  int styleFor(const float4 *vals) override
+  {
+    Material::Scalars s = scalars;
+    float *dst[3] = {&s.opacity, &s.metallic, &s.roughness};
+    unsigned key = 0;
+    for (int i = 0; i < 3; i++) {
+      if (attr[i] < 0)
+        continue;
+      const unsigned l = level(vals[attr[i]].x);
+      key |= l << (5 * i);
+      *dst[i] = float(l) / kLevels;
+    }
+    auto it = cache.find(key);
+    if (it != cache.end())
+      return it->second;
+    SurfaceStyle st = baseStyle;
+    const int id = material->fillStyle(st, colorAlpha, &s) ? scene->addStyle(st) : -1;
+    cache.emplace(key, id);
+    return id;
+  }
+};
+} // namespace
 
 // Row 0 of Tachyon's float output is the top image row; ANARI frame buffers
 // start at the bottom row.
@@ -111,6 +162,7 @@ void Frame::rebuildScene(helium::TimeStamp sceneStamp)
     const Material *m = si.surface->material();
 
     SurfaceStyle style;
+    std::unique_ptr<PrimStyleBinder> binder;
     int colorAttr = -1;
     float colorAlpha = 1.f;
 
@@ -151,12 +203,62 @@ void Frame::rebuildScene(helium::TimeStamp sceneStamp)
           colorAlpha = (*uniform)->w;
         }
       }
-      if (!m->fillStyle(style, colorAlpha))
+
+      // opacity / metallic / roughness may also name an attribute; resolve
+      // them like the color: instance, then vertex/primitive (per primitive,
+      // below), then uniform. An attribute that is not set reads (0,0,0,1).
+      Material::Scalars sc = m->scalars();
+      const int sattr[3] = {m->opacityAttribute(),
+          m->metallicAttribute(),
+          m->roughnessAttribute()};
+      float *sval[3] = {&sc.opacity, &sc.metallic, &sc.roughness};
+      int perPrim[3] = {-1, -1, -1};
+      unsigned mask = 0;
+      for (int i = 0; i < 3; i++) {
+        const int a = sattr[i];
+        if (a < 0)
+          continue;
+        if (si.instAttr && (*si.instAttr)[a]) {
+          *sval[i] = (*si.instAttr)[a]->x;
+          continue;
+        }
+        switch (g->attributeSource(a)) {
+        case ColorSource::VERTEX:
+        case ColorSource::PRIMITIVE:
+          perPrim[i] = a;
+          mask |= 1u << a;
+          break;
+        case ColorSource::UNIFORM:
+          *sval[i] = g->uniformAttribute(a)->x;
+          break;
+        case ColorSource::NONE:
+          *sval[i] = 0.f;
+          break;
+        }
+      }
+
+      if (mask) {
+        auto b = std::make_unique<AttributeStyleBinder>();
+        b->scene = &m_scene;
+        b->material = m;
+        b->baseStyle = style;
+        b->colorAlpha = colorAlpha;
+        b->scalars = sc;
+        for (int i = 0; i < 3; i++)
+          b->attr[i] = perPrim[i];
+        b->attrMask = mask;
+        binder = std::move(b);
+      } else if (!m->fillStyle(style, colorAlpha, &sc)) {
         continue; // fully transparent
+      }
     }
 
+    if (binder) {
+      g->emit(m_scene, -1, si.xfm, colorAttr, binder.get());
+      continue;
+    }
     const int id = m_scene.addStyle(style);
-    g->emit(m_scene, id, si.xfm, colorAttr);
+    g->emit(m_scene, id, si.xfm, colorAttr, nullptr);
   }
 
   m_scene.finishBuild();

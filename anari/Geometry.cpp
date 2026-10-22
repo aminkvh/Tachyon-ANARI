@@ -5,6 +5,7 @@
 // std
 #include <algorithm>
 #include <cmath>
+#include <map>
 #include <string>
 #include <vector>
 
@@ -150,8 +151,40 @@ static inline void readColor(const Array1D &a, size_t i, float *out)
   out[2] = c.z;
 }
 
-void Triangle::emit(
-    TachyonScene &scene, int style, const mat4 &xfm, int colorAttr) const
+using AttrArrays = std::array<helium::ChangeObserverPtr<Array1D>, kNumAttributes>;
+
+// Values of the attributes in 'mask' for primitive 'prim' made of vertices
+// verts[0..numVerts): a vertex attribute is averaged over the vertices, a
+// primitive attribute is read directly.
+static void fillAttrValues(unsigned mask,
+    const AttrArrays &vertexAttr,
+    const AttrArrays &primAttr,
+    const size_t *verts,
+    int numVerts,
+    size_t prim,
+    float4 *vals)
+{
+  for (int a = 0; a < kNumAttributes; a++) {
+    if (!(mask & (1u << a)))
+      continue;
+    if (vertexAttr[a]) {
+      float4 sum(0.f);
+      for (int v = 0; v < numVerts; v++)
+        sum += vertexAttr[a]->readAsAttributeValue(int32_t(verts[v]));
+      vals[a] = sum / float(numVerts);
+    } else if (primAttr[a]) {
+      vals[a] = primAttr[a]->readAsAttributeValue(int32_t(prim));
+    } else {
+      vals[a] = float4(0.f, 0.f, 0.f, 1.f);
+    }
+  }
+}
+
+void Triangle::emit(TachyonScene &scene,
+    int style,
+    const mat4 &xfm,
+    int colorAttr,
+    PrimStyleBinder *binder) const
 {
   if (!m_valid)
     return;
@@ -207,8 +240,17 @@ void Triangle::emit(
       std::copy(c, c + 3, c + 6);
     }
 
+    int tstyle = style;
+    if (binder) {
+      const size_t verts[3] = {i0, i1, i2};
+      float4 vals[kNumAttributes];
+      fillAttrValues(binder->attrMask, m_vertexAttr, m_primAttr, verts, 3, t, vals);
+      tstyle = binder->styleFor(vals);
+      if (tstyle < 0)
+        continue;
+    }
     scene.addTriangle(
-        style, p, nrm ? n : nullptr, (vcol || pcol) ? c : nullptr);
+        tstyle, p, nrm ? n : nullptr, (vcol || pcol) ? c : nullptr);
   }
 }
 
@@ -352,8 +394,11 @@ void Sphere::finalize()
   m_valid = true;
 }
 
-void Sphere::emit(
-    TachyonScene &scene, int style, const mat4 &xfm, int colorAttr) const
+void Sphere::emit(TachyonScene &scene,
+    int style,
+    const mat4 &xfm,
+    int colorAttr,
+    PrimStyleBinder *binder) const
 {
   if (!m_valid)
     return;
@@ -378,7 +423,8 @@ void Sphere::emit(
   std::vector<float> tmpPos, tmpRad, tmpCol;
   const float *outPos = pos;
   const float *outRad = vrad;
-  bool compact = !direct; // need the gathered/transformed arrays
+  bool compact = !direct || binder; // need the gathered/transformed arrays
+  std::vector<int> tmpStyle; // per kept sphere, with a binder
 
   if (vrad && direct && !needRadii) {
     for (size_t p = 0; p < m_numPrims && !compact; p++)
@@ -406,6 +452,14 @@ void Sphere::emit(
         if (!(r > 0.f))
           continue;
       }
+      if (binder) {
+        float4 vals[kNumAttributes];
+        fillAttrValues(binder->attrMask, m_vertexAttr, m_primAttr, &vi, 1, p, vals);
+        const int sid = binder->styleFor(vals);
+        if (sid < 0)
+          continue;
+        tmpStyle.push_back(sid);
+      }
       float c[3];
       xfmPoint(xfm, pos + 3 * vi, c);
       tmpPos.insert(tmpPos.end(), c, c + 3);
@@ -419,6 +473,34 @@ void Sphere::emit(
     }
     outPos = tmpPos.data();
     outRad = vrad ? tmpRad.data() : nullptr;
+    if (binder) {
+      // one sphere array per distinct style
+      std::map<int, std::vector<size_t>> groups;
+      for (size_t i = 0; i < tmpStyle.size(); i++)
+        groups[tmpStyle[i]].push_back(i);
+      std::vector<float> gPos, gRad, gCol;
+      for (auto &g : groups) {
+        const size_t n = g.second.size();
+        gPos.resize(3 * n);
+        gRad.resize(vrad ? n : 0);
+        gCol.resize(tmpCol.empty() ? 0 : 3 * n);
+        for (size_t k = 0; k < n; k++) {
+          const size_t i = g.second[k];
+          std::copy(&tmpPos[3 * i], &tmpPos[3 * i] + 3, &gPos[3 * k]);
+          if (vrad)
+            gRad[k] = tmpRad[i];
+          if (!tmpCol.empty())
+            std::copy(&tmpCol[3 * i], &tmpCol[3 * i] + 3, &gCol[3 * k]);
+        }
+        scene.addSpheres(g.first,
+            n,
+            gPos.data(),
+            vrad ? gRad.data() : nullptr,
+            m_globalRadius * rs,
+            gCol.empty() ? nullptr : gCol.data());
+      }
+      return;
+    }
     scene.addSpheres(style,
         tmpPos.size() / 3,
         outPos,
@@ -529,8 +611,11 @@ void Cylinder::finalize()
   m_valid = true;
 }
 
-void Cylinder::emit(
-    TachyonScene &scene, int style, const mat4 &xfm, int colorAttr) const
+void Cylinder::emit(TachyonScene &scene,
+    int style,
+    const mat4 &xfm,
+    int colorAttr,
+    PrimStyleBinder *binder) const
 {
   if (!m_valid)
     return;
@@ -558,6 +643,16 @@ void Cylinder::emit(
     if (!(r > 0.f))
       continue;
 
+    int cstyle = style;
+    if (binder) {
+      const size_t verts[2] = {v0, v1};
+      float4 vals[kNumAttributes];
+      fillAttrValues(binder->attrMask, m_vertexAttr, m_primAttr, verts, 2, p, vals);
+      cstyle = binder->styleFor(vals);
+      if (cstyle < 0)
+        continue;
+    }
+
     float a[3], b[3], c0[3], c1[3];
     xfmPoint(xfm, pos + 3 * v0, a);
     xfmPoint(xfm, pos + 3 * v1, b);
@@ -577,7 +672,7 @@ void Cylinder::emit(
       caps |= vcap[v0] ? 1 : 0;
       caps |= vcap[v1] ? 2 : 0;
     }
-    scene.addCylinder(style, a, b, r, col0, col1, caps);
+    scene.addCylinder(cstyle, a, b, r, col0, col1, caps);
   }
 }
 

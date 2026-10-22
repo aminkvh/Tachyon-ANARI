@@ -22,6 +22,18 @@ enum class ColorSource
   UNIFORM
 };
 
+// Resolves material parameters that vary per primitive (they come from vertex
+// or primitive attributes) to a Tachyon surface style. Geometries call it for
+// every primitive with the values of the attributes in 'attrMask'.
+struct PrimStyleBinder
+{
+  virtual ~PrimStyleBinder() = default;
+  unsigned attrMask{0}; // bit i: attribute i (4 = color) is needed
+  // 'vals[i]': value of attribute i for the primitive (only valid for bits in
+  // attrMask). Returns a style id, or < 0 when the primitive is invisible.
+  virtual int styleFor(const float4 *vals) = 0;
+};
+
 struct Geometry : public Object
 {
   Geometry(TachyonGlobalState *s);
@@ -47,7 +59,11 @@ struct Geometry : public Object
   // Feeds the geometry, transformed by 'xfm', to the Tachyon scene.
   // 'colorAttr' >= 0: emit per-vertex/-primitive values of that attribute as
   // colors (see attributeSource()); < 0: no per-primitive colors.
-  virtual void emit(TachyonScene &, int, const mat4 &, int) const {}
+  // 'binder' (may be nullptr): picks the style of each primitive instead of
+  // using 'style' for all of them.
+  virtual void emit(
+      TachyonScene &, int, const mat4 &, int, PrimStyleBinder *) const
+  {}
   virtual bool bounds(const mat4 &, float3 &, float3 &) const { return false; }
 
  protected:
@@ -66,7 +82,8 @@ struct Triangle : public Geometry
   void emit(TachyonScene &scene,
       int style,
       const mat4 &xfm,
-      int colorAttr) const override;
+      int colorAttr,
+      PrimStyleBinder *binder) const override;
   bool bounds(const mat4 &xfm, float3 &lo, float3 &hi) const override;
 
  private:
@@ -115,7 +132,8 @@ struct Sphere : public AttributedGeometry
   void emit(TachyonScene &scene,
       int style,
       const mat4 &xfm,
-      int colorAttr) const override;
+      int colorAttr,
+      PrimStyleBinder *binder) const override;
   bool bounds(const mat4 &xfm, float3 &lo, float3 &hi) const override;
 
  private:
@@ -134,7 +152,8 @@ struct Cylinder : public AttributedGeometry
   void emit(TachyonScene &scene,
       int style,
       const mat4 &xfm,
-      int colorAttr) const override;
+      int colorAttr,
+      PrimStyleBinder *binder) const override;
   bool bounds(const mat4 &xfm, float3 &lo, float3 &hi) const override;
 
  private:
