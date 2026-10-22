@@ -12,3 +12,14 @@ build_wsl/prof/
 scenes/stress_clusters.dat
 build_win/sidebyside/*.ppm
 build_win/sidebyside/*.png
+
+# Local benchmarking/profiling tools (not part of the distribution)
+build_win/*.sh
+!build_win/build.sh
+build_win/*.py
+build_win/sidebyside/
+build_win/prof/
+build_wsl/
+gmon.out
+graphify-out/
+t.dat

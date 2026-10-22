@@ -625,7 +625,7 @@ void jitter_disc2f(unsigned int *pval, float *dir) {
  * byte-identical to the previous implementation -- a different (not
  * better or worse) noise pattern for the same random seed. Verified by
  * comparing converged (high sample count) renders' mean/variance rather
- * than a pixel diff; see build_win/bench_ao_convergence.sh.
+ * than a pixel diff.
  */
 void jitter_sphere3f(rng_frand_handle *rngh, float *dir) {
   float u1, u2, s, scale;
