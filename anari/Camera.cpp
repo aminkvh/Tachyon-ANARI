@@ -21,6 +21,9 @@ void Camera::commitParameters()
   m_pos = getParam<float3>("position", float3(0.f));
   m_dir = linalg::normalize(getParam<float3>("direction", float3(0.f, 0.f, 1.f)));
   m_up = linalg::normalize(getParam<float3>("up", float3(0.f, 1.f, 0.f)));
+  m_region[0] = m_region[1] = 0.f;
+  m_region[2] = m_region[3] = 1.f;
+  getParam("imageRegion", ANARI_FLOAT32_BOX2, m_region);
 }
 
 static void fillBasics(SceneCamera &c,
@@ -33,6 +36,12 @@ static void fillBasics(SceneCamera &c,
     c.direction[i] = dir[i];
     c.up[i] = up[i];
   }
+}
+
+void Camera::fillRegion(SceneCamera &c) const
+{
+  for (int i = 0; i < 4; i++)
+    c.region[i] = m_region[i];
 }
 
 void PerspectiveCamera::commitParameters()
@@ -49,6 +58,7 @@ void PerspectiveCamera::fill(SceneCamera &c, float) const
   c.orthographic = false;
   c.fovy = m_fovy;
   c.aspect = m_aspect;
+  fillRegion(c);
 }
 
 void OrthographicCamera::commitParameters()
@@ -65,6 +75,7 @@ void OrthographicCamera::fill(SceneCamera &c, float) const
   c.orthographic = true;
   c.height = m_height;
   c.aspect = m_aspect;
+  fillRegion(c);
 }
 
 } // namespace tachyon_anari

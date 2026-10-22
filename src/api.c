@@ -313,6 +313,12 @@ void rt_rawimage_rgb24(SceneHandle voidscene, unsigned char *img) {
 }
 
 
+void rt_depthbuffer(SceneHandle voidscene, float *depth) {
+  scenedef * scene = (scenedef *) voidscene;
+  scene->depthbuf = depth;
+}
+
+
 void rt_rawimage_rgb96f(SceneHandle voidscene, float *img) {
   scenedef * scene = (scenedef *) voidscene;
   scene->img = (void *) img;

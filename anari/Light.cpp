@@ -35,7 +35,8 @@ void DirectionalLight::emit(TachyonScene &scene, const mat4 &xfm) const
   if (len <= 0.f)
     return;
   dir /= len;
-  const float3 c = m_color * m_irradiance;
+  // Lambertian reflection divides by pi; Tachyon's diffuse term does not
+  const float3 c = m_color * (m_irradiance / float(M_PI));
   scene.addDirectionalLight(&dir.x, &c.x);
 }
 
@@ -52,7 +53,7 @@ void PointLight::emit(TachyonScene &scene, const mat4 &xfm) const
 {
   const float4 p = linalg::mul(xfm, float4(m_position, 1.f));
   const float3 pos(p.x, p.y, p.z);
-  const float3 c = m_color * m_intensity;
+  const float3 c = m_color * (m_intensity / float(M_PI));
   scene.addPointLight(&pos.x, &c.x);
 }
 

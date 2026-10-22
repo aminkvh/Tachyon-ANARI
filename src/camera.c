@@ -407,6 +407,8 @@ color cam_dof_ray(ray * ry, flt x, flt y) {
 
   ry->serial++;                /* increment the ray serial number */
   intersect_objects(ry);       /* trace the ray */
+  if (scene->depthbuf != NULL)
+    ry->hitdist = (ry->intstruct.num > 0) ? ry->intstruct.closest.t : FHUGE;
   return scene->shader(ry);    /* shade the hit point */
 }
 
@@ -484,6 +486,8 @@ color cam_perspective_ray(ray * ry, flt x, flt y) {
 
   ry->serial++;                /* increment the ray serial number */
   intersect_objects(ry);       /* trace the ray */
+  if (scene->depthbuf != NULL)
+    ry->hitdist = (ry->intstruct.num > 0) ? ry->intstruct.closest.t : FHUGE;
   return scene->shader(ry);    /* shade the hit point */
 }
 
@@ -609,6 +613,8 @@ color cam_orthographic_ray(ray * ry, flt x, flt y) {
 
   ry->serial++;                /* increment the ray serial number */
   intersect_objects(ry);       /* trace the ray */
+  if (scene->depthbuf != NULL)
+    ry->hitdist = (ry->intstruct.num > 0) ? ry->intstruct.closest.t : FHUGE;
   return scene->shader(ry);    /* shade the hit point */
 }
 
@@ -644,6 +650,8 @@ color cam_fisheye_ray(ray * ry, flt x, flt y) {
 
   ry->serial++;                /* increment the ray serial number */
   intersect_objects(ry);       /* trace the ray */
+  if (scene->depthbuf != NULL)
+    ry->hitdist = (ry->intstruct.num > 0) ? ry->intstruct.closest.t : FHUGE;
   return scene->shader(ry);    /* shade the hit point */
 }
 

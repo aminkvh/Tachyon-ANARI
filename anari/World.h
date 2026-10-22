@@ -8,6 +8,8 @@
 #include "Material.h"
 #include "Object.h"
 // std
+#include <array>
+#include <optional>
 #include <vector>
 
 namespace tachyon_anari {
@@ -57,16 +59,24 @@ struct Instance : public Object
 
   const Group *group() const { return m_group.ptr; }
   const mat4 &xfm() const { return m_xfm; }
+  const std::array<std::optional<float4>, kNumAttributes> &attributes() const
+  {
+    return m_attr;
+  }
 
  private:
   mat4 m_xfm;
+  std::array<std::optional<float4>, kNumAttributes> m_attr;
   helium::IntrusivePtr<Group> m_group;
 };
+
+using AttributeSet = std::array<std::optional<float4>, kNumAttributes>;
 
 struct SurfaceInstance
 {
   const Surface *surface;
   mat4 xfm;
+  const AttributeSet *instAttr; // instance attributes, nullptr for none
 };
 
 struct LightInstance

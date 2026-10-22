@@ -5,6 +5,7 @@
 // std
 #include <algorithm>
 #include <cmath>
+#include <string>
 
 namespace tachyon_anari {
 
@@ -18,15 +19,19 @@ Geometry *Geometry::createInstance(
   return nullptr; // caller creates an UnsupportedGeometry
 }
 
+static const char *const kAttrNames[kNumAttributes] = {
+    "attribute0", "attribute1", "attribute2", "attribute3", "color"};
+
 void Geometry::commitParameters()
 {
-  m_hasUniformColor = getParam("color", ANARI_FLOAT32_VEC4, &m_uniformColor);
-  if (!m_hasUniformColor) {
-    float3 c3;
-    if (getParam("color", ANARI_FLOAT32_VEC3, &c3)) {
-      m_uniformColor = float4(c3.x, c3.y, c3.z, 1.f);
-      m_hasUniformColor = true;
-    }
+  for (int i = 0; i < kNumAttributes; i++) {
+    m_uniform[i].reset();
+    float4 v;
+    float3 v3;
+    if (getParam(kAttrNames[i], ANARI_FLOAT32_VEC4, &v))
+      m_uniform[i] = v;
+    else if (getParam(kAttrNames[i], ANARI_FLOAT32_VEC3, &v3))
+      m_uniform[i] = float4(v3.x, v3.y, v3.z, 1.f);
   }
 }
 
@@ -37,8 +42,8 @@ Triangle::Triangle(TachyonGlobalState *s)
       m_index(this),
       m_position(this),
       m_normal(this),
-      m_vertexColor(this),
-      m_primitiveColor(this)
+      m_vertexAttr{{{this}, {this}, {this}, {this}, {this}}},
+      m_primAttr{{{this}, {this}, {this}, {this}, {this}}}
 {}
 
 void Triangle::commitParameters()
@@ -47,8 +52,12 @@ void Triangle::commitParameters()
   m_index = getParamObject<Array1D>("primitive.index");
   m_position = getParamObject<Array1D>("vertex.position");
   m_normal = getParamObject<Array1D>("vertex.normal");
-  m_vertexColor = getParamObject<Array1D>("vertex.color");
-  m_primitiveColor = getParamObject<Array1D>("primitive.color");
+  for (int i = 0; i < kNumAttributes; i++) {
+    m_vertexAttr[i] = getParamObject<Array1D>(
+        (std::string("vertex.") + kAttrNames[i]).c_str());
+    m_primAttr[i] = getParamObject<Array1D>(
+        (std::string("primitive.") + kAttrNames[i]).c_str());
+  }
 }
 
 void Triangle::finalize()
@@ -85,28 +94,27 @@ void Triangle::finalize()
         "ignoring it");
     m_normal = nullptr;
   }
-  if (m_vertexColor && m_vertexColor->size() < m_position->size()) {
-    reportMessage(ANARI_SEVERITY_WARNING,
-        "'vertex.color' has fewer elements than 'vertex.position', "
-        "ignoring it");
-    m_vertexColor = nullptr;
-  }
-
   m_numTriangles = m_index ? m_index->size() : m_position->size() / 3;
-  if (m_primitiveColor && m_primitiveColor->size() < m_numTriangles)
-    m_primitiveColor = nullptr;
+  for (int i = 0; i < kNumAttributes; i++) {
+    if (m_vertexAttr[i] && m_vertexAttr[i]->size() < m_position->size()) {
+      reportMessage(ANARI_SEVERITY_WARNING,
+          "'vertex.%s' has fewer elements than 'vertex.position', ignoring it",
+          kAttrNames[i]);
+      m_vertexAttr[i] = nullptr;
+    }
+    if (m_primAttr[i] && m_primAttr[i]->size() < m_numTriangles)
+      m_primAttr[i] = nullptr;
+  }
   m_valid = true;
 }
 
-ColorSource Triangle::colorSource() const
+ColorSource Triangle::attributeSource(int attr) const
 {
-  if (m_vertexColor)
+  if (m_vertexAttr[attr])
     return ColorSource::VERTEX;
-  if (m_primitiveColor)
+  if (m_primAttr[attr])
     return ColorSource::PRIMITIVE;
-  if (m_hasUniformColor)
-    return ColorSource::UNIFORM;
-  return ColorSource::NONE;
+  return Geometry::attributeSource(attr);
 }
 
 static inline void xfmPoint(const mat4 &m, const float *p, float *out)
@@ -138,7 +146,7 @@ static inline void readColor(const Array1D &a, size_t i, float *out)
 }
 
 void Triangle::emit(
-    TachyonScene &scene, int style, const mat4 &xfm, bool useColors) const
+    TachyonScene &scene, int style, const mat4 &xfm, int colorAttr) const
 {
   if (!m_valid)
     return;
@@ -159,8 +167,12 @@ void Triangle::emit(
     normalMat = linalg::transpose(linalg::inverse(m3));
   }
 
-  const bool vcol = useColors && m_vertexColor;
-  const bool pcol = useColors && !vcol && m_primitiveColor;
+  const Array1D *vattr =
+      colorAttr >= 0 ? m_vertexAttr[colorAttr].get() : nullptr;
+  const Array1D *pattr =
+      (colorAttr >= 0 && !vattr) ? m_primAttr[colorAttr].get() : nullptr;
+  const bool vcol = vattr != nullptr;
+  const bool pcol = pattr != nullptr;
 
   for (size_t t = 0; t < m_numTriangles; t++) {
     const uint32_t i0 = idx ? idx[3 * t + 0] : uint32_t(3 * t + 0);
@@ -181,11 +193,11 @@ void Triangle::emit(
     }
 
     if (vcol) {
-      readColor(*m_vertexColor, i0, c + 0);
-      readColor(*m_vertexColor, i1, c + 3);
-      readColor(*m_vertexColor, i2, c + 6);
+      readColor(*vattr, i0, c + 0);
+      readColor(*vattr, i1, c + 3);
+      readColor(*vattr, i2, c + 6);
     } else if (pcol) {
-      readColor(*m_primitiveColor, t, c + 0);
+      readColor(*pattr, t, c + 0);
       std::copy(c, c + 3, c + 3);
       std::copy(c, c + 3, c + 6);
     }

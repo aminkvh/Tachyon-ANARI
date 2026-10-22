@@ -31,6 +31,7 @@ struct SceneCamera
   float fovy{1.0471976f}; // radians (perspective)
   float height{1.f}; // world units (orthographic)
   float aspect{1.f}; // image plane width / height
+  float region[4]{0.f, 0.f, 1.f, 1.f}; // imageRegion x0,y0,x1,y1 (y up)
 };
 
 class TachyonScene
@@ -61,6 +62,9 @@ class TachyonScene
   void setSamples(int pixelSamples);
   void setCamera(const SceneCamera &cam);
   void setOutput(int width, int height, float *rgbBuffer);
+  // Optional per-pixel primary hit distance (same layout as the image, 1e18
+  // for misses); nullptr disables it.
+  void setDepthOutput(float *depthBuffer);
 
   // Renders into the buffer given to setOutput(), 3 floats per pixel. Rows are
   // stored top row first.
@@ -81,6 +85,7 @@ class TachyonScene
   std::vector<Style> m_styles;
   void *m_headlight{nullptr};
   bool m_lit{false};
+  bool m_transparent{false};
   size_t m_numTriangles{0};
   int m_width{0}, m_height{0};
   float *m_buffer{nullptr};

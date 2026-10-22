@@ -44,8 +44,13 @@ void Material::readCommon(const char *colorName)
   }
 
   const std::string attr = getParamString(colorName, "none");
-  m_colorFromGeometry = attr == "color";
-  if (attr != "none" && attr != "color" && !attr.empty()) {
+  m_colorAttribute = -1;
+  if (attr == "color")
+    m_colorAttribute = 4;
+  else if (attr.size() == 10 && attr.compare(0, 9, "attribute") == 0
+      && attr[9] >= '0' && attr[9] <= '3')
+    m_colorAttribute = attr[9] - '0';
+  if (attr != "none" && m_colorAttribute < 0 && !attr.empty()) {
     reportMessage(ANARI_SEVERITY_WARNING,
         "color attribute '%s' not supported, using constant color",
         attr.c_str());
@@ -58,7 +63,7 @@ void Material::readCommon(const char *colorName)
 
 bool Material::fillStyle(SurfaceStyle &s, float colorAlpha) const
 {
-  if (!m_colorFromGeometry) {
+  if (m_colorAttribute < 0) {
     s.color[0] = m_color.x;
     s.color[1] = m_color.y;
     s.color[2] = m_color.z;

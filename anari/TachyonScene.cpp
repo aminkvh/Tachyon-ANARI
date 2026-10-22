@@ -57,6 +57,7 @@ void TachyonScene::reset(bool lit, int numThreads)
 
   m_scene = rt_newscene();
   m_lit = lit;
+  m_transparent = false;
 
   rt_outputfile(m_scene, ""); // never write image files from the device
   rt_verbose(m_scene, 0);
@@ -91,6 +92,9 @@ int TachyonScene::addStyle(const SurfaceStyle &s)
   void *t = rt_texture(m_scene, &tex);
   if (s.phong > 0.f)
     rt_tex_phong(t, s.phong, s.phongExp, s.metal ? 1 : 0);
+
+  if (s.opacity < 1.f)
+    m_transparent = true;
 
   Style st;
   st.diffuse = s.diffuse;
@@ -165,6 +169,10 @@ void TachyonScene::finishBuild()
 {
   if (m_lit)
     return;
+  // The camera headlight can never be shadowed by anything the camera sees,
+  // so opaque scenes use Tachyon's medium shader, which skips shadow rays.
+  if (!m_transparent)
+    rt_shadermode(m_scene, RT_SHADER_MEDIUM);
   const float white[3] = {1.f, 1.f, 1.f};
   const float dir[3] = {0.f, 0.f, 1.f}; // re-aimed by setCamera()
   apitexture tex;
@@ -183,6 +191,11 @@ void TachyonScene::setShading(float ambient, float diffuseScale)
       rt_tex_shading(vt, ambient, diffuseScale * st.diffuse);
     }
   }
+}
+
+void TachyonScene::setDepthOutput(float *depthBuffer)
+{
+  rt_depthbuffer(m_scene, depthBuffer);
 }
 
 void TachyonScene::setBackground(const float *rgb)
@@ -229,7 +242,19 @@ void TachyonScene::setCamera(const SceneCamera &cam)
   const float zoom = cam.orthographic
       ? 1.f / (cam.height > 0.f ? cam.height : 1.f)
       : 0.5f / std::tan(0.5f * cam.fovy);
-  rt_camera_zoom(m_scene, zoom);
+  rt_camera_zoom(m_scene, zoom); // also resets the frustum to automatic
+
+  const float *r = cam.region;
+  if (r[0] != 0.f || r[1] != 0.f || r[2] != 1.f || r[3] != 1.f) {
+    // image plane is (aspect / zoom) x (1 / zoom); Tachyon's vertical axis is
+    // flipped relative to ANARI's (see below)
+    const float pw = aspect / zoom, ph = 1.f / zoom;
+    rt_camera_frustum(m_scene,
+        (r[0] - 0.5f) * pw,
+        (r[2] - 0.5f) * pw,
+        (0.5f - r[3]) * ph,
+        (0.5f - r[1]) * ph);
+  }
 
   // Tachyon's camera basis is left-handed (right = up x view) while ANARI's
   // is right-handed (right = view x up). Negating 'up' flips Tachyon's right

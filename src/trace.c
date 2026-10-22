@@ -319,6 +319,8 @@ void * thread_trace(thr_parms * t) {
       for (x=startx; x<=stopx; x+=xinc,addr+=hskip) {
         primary.frng = cachefrng; /* each pixel uses the same AO RNG seed */
         col=scene->camera.cam_ray(&primary, x, y);    /* generate ray */ 
+        if (scene->depthbuf != NULL)
+          scene->depthbuf[addr / 3] = (float) primary.hitdist;
         img[addr    ] = col.r;   /* Store final pixel to the image buffer */
         img[addr + 1] = col.g;   /* Store final pixel to the image buffer */
         img[addr + 2] = col.b;   /* Store final pixel to the image buffer */

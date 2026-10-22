@@ -54,6 +54,18 @@ void Instance::commitParameters()
 {
   m_xfm = getParam<mat4>("transform", mat4(linalg::identity));
   m_group = getParamObject<Group>("group");
+
+  static const char *const names[kNumAttributes] = {
+      "attribute0", "attribute1", "attribute2", "attribute3", "color"};
+  for (int i = 0; i < kNumAttributes; i++) {
+    m_attr[i].reset();
+    float4 v;
+    float3 v3;
+    if (getParam(names[i], ANARI_FLOAT32_VEC4, &v))
+      m_attr[i] = v;
+    else if (getParam(names[i], ANARI_FLOAT32_VEC3, &v3))
+      m_attr[i] = float4(v3.x, v3.y, v3.z, 1.f);
+  }
 }
 
 void Instance::finalize()
@@ -81,6 +93,7 @@ void World::commitParameters()
 static void collectArrays(const ObjectArray *surfaces,
     const ObjectArray *lights,
     const mat4 &xfm,
+    const AttributeSet *instAttr,
     std::vector<SurfaceInstance> &outSurfaces,
     std::vector<LightInstance> &outLights)
 {
@@ -88,7 +101,7 @@ static void collectArrays(const ObjectArray *surfaces,
     std::for_each(surfaces->handlesBegin(), surfaces->handlesEnd(), [&](auto *o) {
       auto *s = static_cast<Surface *>(o);
       if (s && s->isValid() && s->isVisible())
-        outSurfaces.push_back({s, xfm});
+        outSurfaces.push_back({s, xfm, instAttr});
     });
   }
   if (lights) {
@@ -106,6 +119,7 @@ void World::collect(std::vector<SurfaceInstance> &surfaces,
   collectArrays(m_zeroSurfaces.get(),
       m_zeroLights.get(),
       mat4(linalg::identity),
+      nullptr,
       surfaces,
       lights);
 
@@ -117,6 +131,7 @@ void World::collect(std::vector<SurfaceInstance> &surfaces,
             collectArrays(i->group()->surfaces(),
                 i->group()->lights(),
                 i->xfm(),
+                &i->attributes(),
                 surfaces,
                 lights);
         });

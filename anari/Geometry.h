@@ -5,10 +5,15 @@
 
 #include "Object.h"
 #include "TachyonScene.h"
+// std
+#include <array>
+#include <optional>
 
 namespace tachyon_anari {
 
-// Where the colors for a material with color="color" come from.
+constexpr int kNumAttributes = 5; // attribute0-3 and color
+
+// Where the values of an attribute come from.
 enum class ColorSource
 {
   NONE,
@@ -28,18 +33,25 @@ struct Geometry : public Object
 
   void commitParameters() override;
 
-  // Which color source is available (used by materials with color="color")
-  virtual ColorSource colorSource() const { return ColorSource::NONE; }
-  const float4 &uniformColor() const { return m_uniformColor; }
+  // Which source provides attribute 'attr' (0-3, 4 = color), following the
+  // lookup order vertex > primitive > uniform
+  virtual ColorSource attributeSource(int attr) const
+  {
+    return m_uniform[attr] ? ColorSource::UNIFORM : ColorSource::NONE;
+  }
+  const std::optional<float4> &uniformAttribute(int attr) const
+  {
+    return m_uniform[attr];
+  }
 
   // Feeds the geometry, transformed by 'xfm', to the Tachyon scene.
-  // 'useColors': emit per-vertex/-primitive colors (see colorSource()).
-  virtual void emit(TachyonScene &, int, const mat4 &, bool) const {}
+  // 'colorAttr' >= 0: emit per-vertex/-primitive values of that attribute as
+  // colors (see attributeSource()); < 0: no per-primitive colors.
+  virtual void emit(TachyonScene &, int, const mat4 &, int) const {}
   virtual bool bounds(const mat4 &, float3 &, float3 &) const { return false; }
 
  protected:
-  bool m_hasUniformColor{false};
-  float4 m_uniformColor{1.f, 1.f, 1.f, 1.f};
+  std::array<std::optional<float4>, kNumAttributes> m_uniform;
 };
 
 struct Triangle : public Geometry
@@ -50,19 +62,19 @@ struct Triangle : public Geometry
   void finalize() override;
   bool isValid() const override { return m_valid; }
 
-  ColorSource colorSource() const override;
+  ColorSource attributeSource(int attr) const override;
   void emit(TachyonScene &scene,
       int style,
       const mat4 &xfm,
-      bool useColors) const override;
+      int colorAttr) const override;
   bool bounds(const mat4 &xfm, float3 &lo, float3 &hi) const override;
 
  private:
   helium::ChangeObserverPtr<Array1D> m_index;
   helium::ChangeObserverPtr<Array1D> m_position;
   helium::ChangeObserverPtr<Array1D> m_normal;
-  helium::ChangeObserverPtr<Array1D> m_vertexColor;
-  helium::ChangeObserverPtr<Array1D> m_primitiveColor;
+  std::array<helium::ChangeObserverPtr<Array1D>, kNumAttributes> m_vertexAttr;
+  std::array<helium::ChangeObserverPtr<Array1D>, kNumAttributes> m_primAttr;
   bool m_valid{false};
   size_t m_numTriangles{0};
 };

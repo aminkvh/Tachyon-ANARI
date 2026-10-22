@@ -20,8 +20,8 @@ struct Material : public Object
 
   void commitParameters() override;
 
-  // Does the material take its color from the geometry's "color" attribute?
-  bool colorFromGeometry() const { return m_colorFromGeometry; }
+  // Attribute (0-3, 4 = color) the color is taken from, or -1 for constant
+  int colorAttribute() const { return m_colorAttribute; }
   const float3 &color() const { return m_color; }
 
   // Fills the Tachyon surface style (color excluded when it comes from the
@@ -31,7 +31,7 @@ struct Material : public Object
  protected:
   float3 m_color{1.f, 1.f, 1.f};
   float m_colorAlpha{1.f};
-  bool m_colorFromGeometry{false};
+  int m_colorAttribute{-1};
   float m_opacity{1.f};
   float m_alphaCutoff{0.5f};
   enum class AlphaMode

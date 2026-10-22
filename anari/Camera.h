@@ -20,11 +20,13 @@ struct Camera : public Object
   // Fills the Tachyon camera description. 'frameAspect' is used when the
   // application does not set an explicit aspect ratio.
   virtual void fill(SceneCamera &cam, float frameAspect) const {}
+  void fillRegion(SceneCamera &cam) const;
 
  protected:
   float3 m_pos{0.f, 0.f, 0.f};
   float3 m_dir{0.f, 0.f, 1.f};
   float3 m_up{0.f, 1.f, 0.f};
+  float m_region[4]{0.f, 0.f, 1.f, 1.f};
 };
 
 struct PerspectiveCamera : public Camera

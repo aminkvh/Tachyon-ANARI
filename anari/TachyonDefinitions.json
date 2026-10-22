@@ -35,8 +35,8 @@
           "name": "ignoreAmbientLighting",
           "types": ["ANARI_BOOL"],
           "tags": [],
-          "default": true,
-          "description": "ignore 'ambientRadiance' and 'ambientColor' and use the built-in shading balance instead"
+          "default": false,
+          "description": "ignore 'ambientRadiance' and 'ambientColor' and use a fixed built-in ambient level instead"
         },
         {
           "name": "eyeLightBlendRatio",

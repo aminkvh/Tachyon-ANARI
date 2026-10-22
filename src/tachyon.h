@@ -227,6 +227,14 @@ void rt_rawimage_rgb24(SceneHandle, unsigned char *rawimage);
  */
 void rt_rawimage_rgb96f(SceneHandle, float *rawimage);
 
+/**
+ * Optionally also record the primary-ray hit distance of every pixel (one
+ * float per pixel, same layout as the 96-bit float image; FHUGE for misses)
+ * while rendering with rt_rawimage_rgb96f(). NULL (the default) disables it,
+ * at no cost.  With antialiasing the last sample's distance is stored.
+ */
+void rt_depthbuffer(SceneHandle, float *depth);
+
 /** Explicitly set the number of worker threads Tachyon will use.  */
 void rt_set_numthreads(SceneHandle, int);
 
@@ -1147,6 +1155,7 @@ typedef struct {
   amboccludedata ambocc;     /**< ambient occlusion data                  */
   int scenecheck;            /**< re-check scene for changes              */
   void * parbuf;             /**< parallel message passing handle         */
+  float * depthbuf;          /**< optional per-pixel primary hit distance */
   void * threads;            /**< thread handles                          */
   void * threadparms;        /**< thread parameters                       */
   clip_group * curclipgroup; /**< current clipping group, during parsing  */
@@ -1170,6 +1179,7 @@ typedef struct ray_t {
                          /**< background colors etc                          */
   unsigned int randval;  /**< random number seed                             */
   rng_frand_handle frng; /**< 32-bit FP random number generator handle       */
+  flt hitdist;           /**< primary hit distance, only set if depthbuf     */
 } ray;
 
 

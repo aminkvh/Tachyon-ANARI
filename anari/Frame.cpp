@@ -73,6 +73,9 @@ void Frame::finalize()
   m_depthBuffer.clear();
   if (m_depthType == ANARI_FLOAT32)
     m_depthBuffer.assign(numPixels, std::numeric_limits<float>::infinity());
+  m_depthRaw.clear();
+  if (m_depthType == ANARI_FLOAT32)
+    m_depthRaw.assign(numPixels, 1e18f);
   m_rgb.assign(numPixels * 3, 0.f);
 }
 
@@ -108,7 +111,7 @@ void Frame::rebuildScene(helium::TimeStamp sceneStamp)
     const Material *m = si.surface->material();
 
     SurfaceStyle style;
-    bool useColors = false;
+    int colorAttr = -1;
     float colorAlpha = 1.f;
 
     if (!m) { // like helide: show surfaces without a material in magenta
@@ -121,22 +124,31 @@ void Frame::rebuildScene(helium::TimeStamp sceneStamp)
             "skipping surface with unsupported material");
         continue;
       }
-      if (m->colorFromGeometry()) {
-        switch (g->colorSource()) {
-        case ColorSource::VERTEX:
-        case ColorSource::PRIMITIVE:
-          useColors = true;
-          break;
-        case ColorSource::UNIFORM: {
-          const float4 &u = g->uniformColor();
-          style.color[0] = u.x;
-          style.color[1] = u.y;
-          style.color[2] = u.z;
-          colorAlpha = u.w;
-          break;
+      const int attr = m->colorAttribute();
+      if (attr >= 0) {
+        // lookup order: instance attribute, then geometry vertex, primitive
+        // and uniform attributes
+        const std::optional<float4> *uniform = nullptr;
+        if (si.instAttr && (*si.instAttr)[attr])
+          uniform = &(*si.instAttr)[attr];
+        else {
+          switch (g->attributeSource(attr)) {
+          case ColorSource::VERTEX:
+          case ColorSource::PRIMITIVE:
+            colorAttr = attr;
+            break;
+          case ColorSource::UNIFORM:
+            uniform = &g->uniformAttribute(attr);
+            break;
+          case ColorSource::NONE:
+            break;
+          }
         }
-        case ColorSource::NONE:
-          break;
+        if (uniform) {
+          style.color[0] = (*uniform)->x;
+          style.color[1] = (*uniform)->y;
+          style.color[2] = (*uniform)->z;
+          colorAlpha = (*uniform)->w;
         }
       }
       if (!m->fillStyle(style, colorAlpha))
@@ -144,7 +156,7 @@ void Frame::rebuildScene(helium::TimeStamp sceneStamp)
     }
 
     const int id = m_scene.addStyle(style);
-    g->emit(m_scene, id, si.xfm, useColors);
+    g->emit(m_scene, id, si.xfm, colorAttr);
   }
 
   m_scene.finishBuild();
@@ -212,6 +224,7 @@ void Frame::renderFrame()
 
   m_scene.setOutput(int(m_size.x), int(m_size.y), m_rgb.data());
   m_scene.setCamera(cam);
+  m_scene.setDepthOutput(m_depthRaw.empty() ? nullptr : m_depthRaw.data());
   const float4 &bg = m_renderer->background();
   m_scene.setBackground(&bg.x);
   m_scene.setSamples(m_renderer->pixelSamples());
@@ -226,6 +239,19 @@ void Frame::renderFrame()
 
 void Frame::writePixels()
 {
+  // Depth: distance along the (normalized) primary ray, +inf for misses
+  if (!m_depthBuffer.empty() && m_depthRaw.size() == m_depthBuffer.size()) {
+    const size_t dw = m_size.x, dh = m_size.y;
+    for (size_t y = 0; y < dh; y++) {
+      const size_t srcRow = kTachyonRowsTopDown ? dh - 1 - y : y;
+      const float *src = m_depthRaw.data() + srcRow * dw;
+      float *dst = m_depthBuffer.data() + y * dw;
+      for (size_t x = 0; x < dw; x++)
+        dst[x] = src[x] >= 1e17f ? std::numeric_limits<float>::infinity()
+                                 : src[x];
+    }
+  }
+
   if (m_colorType == ANARI_UNKNOWN)
     return;
 

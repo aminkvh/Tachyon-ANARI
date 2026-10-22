@@ -57,6 +57,7 @@ struct Frame : public helium::BaseFrame
 
   std::vector<uint8_t> m_pixelBuffer;
   std::vector<float> m_depthBuffer;
+  std::vector<float> m_depthRaw; // Tachyon hit distances (1e18: miss)
   std::vector<float> m_rgb; // Tachyon's float output, 3 floats per pixel
 
   helium::IntrusivePtr<Renderer> m_renderer;

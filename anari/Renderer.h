@@ -25,7 +25,7 @@ struct Renderer : public Object
   int m_pixelSamples{1};
   float m_ambientRadiance{1.f};
   float3 m_ambientColor{1.f, 1.f, 1.f};
-  bool m_ignoreAmbient{true};
+  bool m_ignoreAmbient{false};
   float m_eyeLightBlend{0.5f};
 };
 
