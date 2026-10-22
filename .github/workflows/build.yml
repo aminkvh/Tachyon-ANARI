@@ -168,9 +168,13 @@ jobs:
 
       - name: Smoke test (anariRenderTests)
         run: |
-          export PATH="$ANARI_PREFIX/bin:$TACHYON_ROOT/build/anari:$PATH"
-          export LD_LIBRARY_PATH="$ANARI_PREFIX/lib:$TACHYON_ROOT/build/anari${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
-          export DYLD_LIBRARY_PATH="$ANARI_PREFIX/lib:$TACHYON_ROOT/build/anari${DYLD_LIBRARY_PATH:+:$DYLD_LIBRARY_PATH}"
+          # Use POSIX-form directories: bash cannot resolve mixed D:/ PATH entries under MSYS2.
+          sdk_bin="$(cd "$ANARI_PREFIX/bin" && pwd)"
+          sdk_lib="$(cd "$ANARI_PREFIX" && pwd)/lib"
+          dev_dir="$(cd build/anari && pwd)"
+          export PATH="$sdk_bin:$dev_dir:$PATH"
+          export LD_LIBRARY_PATH="$sdk_lib:$dev_dir${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+          export DYLD_LIBRARY_PATH="$sdk_lib:$dev_dir${DYLD_LIBRARY_PATH:+:$DYLD_LIBRARY_PATH}"
           mkdir -p render-out
           cd render-out
           if ! anariRenderTests --library tachyon > render.log 2>&1; then
