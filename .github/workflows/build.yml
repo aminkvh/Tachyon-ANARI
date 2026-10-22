@@ -132,7 +132,23 @@ jobs:
             -DBUILD_EXAMPLES=OFF \
             -DBUILD_CTS=OFF \
             -DBUILD_VIEWER=OFF
-          cmake --build deps/anari-sdk/build --parallel
+          # Keep going past failures so every other target is still built.
+          set +e
+          cmake --build deps/anari-sdk/build --parallel -- -k 0 > sdk-build.log 2>&1
+          set -e
+          # On Windows/MinGW the SDK's anariCts tool fails to link (undefined
+          # anari::scenes::colors::palette). It is not needed here, and it is
+          # not installed, so tolerate only that target on Windows.
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            failed=$(grep '^FAILED:' sdk-build.log | grep -v 'anariCts' || true)
+          else
+            failed=$(grep '^FAILED:' sdk-build.log || true)
+          fi
+          if [ -n "$failed" ]; then
+            tail -n 80 sdk-build.log
+            echo "$failed"
+            exit 1
+          fi
           cmake --install deps/anari-sdk/build
 
       - name: Build tachyon ANARI device
