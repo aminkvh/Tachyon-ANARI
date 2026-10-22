@@ -209,10 +209,10 @@ jobs:
           Fork of John Stone's Tachyon 0.99b6, now also available as a Khronos ANARI rendering device.
 
           New in this release:
-          - Experimental ANARI device (`tachyon-anari-*` archives). It renders triangle meshes with perspective and orthographic cameras, matte and approximate physically based materials, directional and point lights, and color and depth output. It is a small CPU-only library that needs only the ANARI SDK 0.16 loader. Other geometry types are skipped with a warning.
-          - Windows: binary image textures (PPM/TGA) and volume data were read in text mode, which truncated them and left uninitialized memory. Scenes using them now render correctly and identically on every run.
-          - Texture lookups no longer read outside the image.
-          - CMake build (`-DTACHYON_BUILD_ANARI=ON` for the device).
+          - ANARI device: sphere and cylinder geometry. Large sphere sets are stored compactly with their own BVH; on a 1M-sphere scene the first frame takes about 0.16 s using 79 MB, comparable in time to the SDK's Embree-based reference device and with less memory.
+          - ANARI device: material color, opacity, metallic and roughness can be driven by attributes. Opacity from per-vertex data is applied per triangle, not interpolated.
+          - Experimental ANARI device (`tachyon-anari-*` archives): triangles, spheres and cylinders, perspective and orthographic cameras, matte and approximate physically based materials, directional and point lights, color and depth output. It is a small CPU-only library that needs only the ANARI SDK 0.16 loader. Other geometry types are skipped with a warning.
+          - Windows: PPM/TGA image textures and volume data were read in text mode, which truncated them. Scenes using them now render correctly and identically on every run. Texture lookups no longer read outside the image.
 
           From the previous release: Windows (MinGW) builds use all cores by default; rendering is about 1.3–1.4x faster on AO and lattice test scenes; scene parsing is about 7–10x faster on large triangle meshes.
 

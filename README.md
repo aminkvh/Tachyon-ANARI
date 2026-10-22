@@ -17,11 +17,11 @@ Output is byte-identical to stock on the test scenes, except for ambient-occlusi
 
 ## ANARI device (experimental)
 
-Tachyon can also be used as a [Khronos ANARI](https://www.khronos.org/anari) rendering device, so ANARI applications can render with it. It is a small CPU-only library: under 0.5 MB on Linux, and it needs nothing beyond the ANARI SDK. It currently supports:
+Tachyon can also be used as a [Khronos ANARI](https://www.khronos.org/anari) rendering device, so ANARI applications can render with it. It is a small CPU-only library: about 0.6 MB on Linux, and it needs nothing beyond the ANARI SDK. It currently supports:
 
-- triangle meshes
+- triangles, spheres and cylinders (large sphere sets are stored compactly with their own BVH)
 - perspective and orthographic cameras
-- `matte` materials, plus `physicallyBased` (approximated)
+- `matte` materials, plus `physicallyBased` (approximated); color, opacity, metallic and roughness can come from attributes
 - directional and point lights
 - color and depth output
 
