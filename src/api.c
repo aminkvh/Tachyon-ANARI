@@ -23,6 +23,7 @@
 #include "quadric.h"
 #include "ring.h"
 #include "sphere.h"
+#include "spherearray.h"
 #include "triangle.h"
 #include "vol.h"
 #include "extvol.h"
@@ -1126,6 +1127,19 @@ void rt_sphere3fv_bulk(SceneHandle voidscene, void * tex,
   vector vctr;
   vctr.x = ctr[0]; vctr.y = ctr[1]; vctr.z = ctr[2];
   add_bounded_object(scene, newsphere_bulk(&scene->objarena, tex, vctr, rad));
+}
+
+
+void * rt_spherearray(SceneHandle voidscene, void * tex, int n,
+                      const float *ctr, const float *rad, float uniformrad,
+                      const float *rgb) {
+  scenedef * scene = (scenedef *) voidscene;
+  void * usedtex = NULL;
+  object * o = newspherearray(tex, n, ctr, rad, uniformrad, rgb, &usedtex);
+  if (o == NULL)
+    return NULL;
+  add_bounded_object(scene, o);
+  return usedtex;
 }
 
 

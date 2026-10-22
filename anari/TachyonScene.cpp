@@ -182,6 +182,24 @@ void TachyonScene::addSphere(
   m_numSpheres++;
 }
 
+void TachyonScene::addSpheres(int style,
+    size_t count,
+    const float *center,
+    const float *radius,
+    float uniformRadius,
+    const float *rgb)
+{
+  if (count == 0)
+    return;
+  Style &st = m_styles[style];
+  void *base = st.textures[0];
+  void *used = rt_spherearray(
+      m_scene, base, int(count), center, radius, uniformRadius, rgb);
+  if (used && used != base)
+    st.textures.push_back(used); // per-array color texture: needs shading too
+  m_numSpheres += count;
+}
+
 void TachyonScene::addCylinder(int style,
     const float *p0,
     const float *p1,

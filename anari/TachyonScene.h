@@ -56,6 +56,17 @@ class TachyonScene
   // color; textures are shared between all objects of a style that use the
   // same color, so only the number of distinct colors costs memory.
   void addSphere(int style, const float *center, float radius, const float *rgb);
+  // Many spheres as one Tachyon object with its own compact BVH (about 40
+  // bytes per sphere, no per-sphere allocation). 'center': 3 floats per
+  // sphere; 'radius': one float per sphere or nullptr for 'uniformRadius';
+  // 'rgb': 3 floats per sphere or nullptr for the style color. The data is
+  // copied.
+  void addSpheres(int style,
+      size_t count,
+      const float *center,
+      const float *radius,
+      float uniformRadius,
+      const float *rgb);
   // Finite cylinder from p0 to p1. 'caps': bit 0 closes the p0 end, bit 1 the
   // p1 end. With two different colors the cylinder is split at its midpoint
   // (Tachyon has no color gradients), one half per color.

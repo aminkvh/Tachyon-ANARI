@@ -684,6 +684,14 @@ void rt_polycylinder3fv(SceneHandle, void *tex, const float *points,
 void rt_sphere(SceneHandle, void *tex, apivector center, flt radius);
 /** Define a sphere with associated texture, center, and radius.  */
 void rt_sphere3fv(SceneHandle, void *tex, const float *center, float radius);
+/** Define many spheres as one object with its own compact BVH (see
+ *  spherearray.h): ctr is 3 floats per sphere, rad (one float per sphere)
+ *  may be NULL for a uniform radius, rgb (3 floats per sphere) may be NULL to
+ *  use the color of tex. All input is copied. Returns the texture the object
+ *  uses (tex, or a per-array copy that picks colors per sphere), or NULL if
+ *  no object was created. */
+void * rt_spherearray(SceneHandle, void *tex, int n, const float *ctr,
+                      const float *rad, float uniformrad, const float *rgb);
 /** The _bulk variants allocate the object from the scene's bulk arena
  *  instead of malloc (for scenes with very many small objects). */
 void rt_sphere3fv_bulk(SceneHandle, void *tex, const float *center, float radius);
@@ -1040,6 +1048,8 @@ typedef struct {
 typedef struct {
   int num;                   /**< number of intersections    */
   intersection closest;      /**< closest intersection > 0.0 */
+  unsigned int prim;         /**< which primitive of a multi-primitive object
+                                  (see spherearray.c) is the closest hit */
   flt shadowfilter;          /**< modulation by transparent surfaces */
 } intersectstruct;
 

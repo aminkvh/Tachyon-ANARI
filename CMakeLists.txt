@@ -14,7 +14,7 @@ find_package(Threads REQUIRED)
 # Core ray tracing library (no main()). Source list mirrors build_win/build.sh.
 set(TACHYON_CORE_SRCS
   api apigeom box global hash parallel threads camera render trace grid
-  bvh intersect sphere plane ring triangle cylinder quadric extvol vol ui
+  bvh intersect sphere spherearray plane ring triangle cylinder quadric extvol vol ui
   util vector shade texture coordsys imap light imageio jpeg pngfile ppm
   psd sgirgb tgafile winbmp)
 

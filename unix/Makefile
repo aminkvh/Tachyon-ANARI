@@ -228,6 +228,7 @@ RAYOBJS= ${OBJDIR}/api.o \
 	${OBJDIR}/bvh.o \
 	${OBJDIR}/intersect.o \
 	${OBJDIR}/sphere.o \
+	${OBJDIR}/spherearray.o \
 	${OBJDIR}/plane.o \
 	${OBJDIR}/ring.o \
 	${OBJDIR}/triangle.o \
@@ -292,6 +293,9 @@ ${OBJDIR}/texture.o : ${SRCDIR}/texture.c ${OBJDEPS}
 
 ${OBJDIR}/sphere.o : ${SRCDIR}/sphere.c ${OBJDEPS} ${SRCDIR}/sphere.h
 	${CC} ${CFLAGS} -c ${SRCDIR}/sphere.c -o ${OBJDIR}/sphere.o
+
+${OBJDIR}/spherearray.o : ${SRCDIR}/spherearray.c ${OBJDEPS} ${SRCDIR}/spherearray.h
+	${CC} ${CFLAGS} -c ${SRCDIR}/spherearray.c -o ${OBJDIR}/spherearray.o
 
 ${OBJDIR}/sgirgb.o : ${SRCDIR}/sgirgb.c ${OBJDEPS}
 	${CC} ${CFLAGS} -c ${SRCDIR}/sgirgb.c -o ${OBJDIR}/sgirgb.o
@@ -371,7 +375,7 @@ ${OBJDIR}/bndbox.o : ${SRCDIR}/bndbox.c ${OBJDEPS}
 ${OBJDIR}/apigeom.o : ${SRCDIR}/apigeom.c ${OBJDEPS}
 	${CC} ${CFLAGS} -c ${SRCDIR}/apigeom.c -o ${OBJDIR}/apigeom.o
 
-${OBJDIR}/api.o : ${SRCDIR}/api.c ${OBJDEPS} ${SRCDIR}/sphere.h ${SRCDIR}/plane.h ${SRCDIR}/triangle.h ${SRCDIR}/cylinder.h
+${OBJDIR}/api.o : ${SRCDIR}/api.c ${OBJDEPS} ${SRCDIR}/sphere.h ${SRCDIR}/spherearray.h ${SRCDIR}/plane.h ${SRCDIR}/triangle.h ${SRCDIR}/cylinder.h
 	${CC} ${CFLAGS} -c ${SRCDIR}/api.c -o ${OBJDIR}/api.o
 
 clean :

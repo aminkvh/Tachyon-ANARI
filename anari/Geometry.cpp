@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <cmath>
 #include <string>
+#include <vector>
 
 namespace tachyon_anari {
 
@@ -368,22 +369,77 @@ void Sphere::emit(
   const Array1D *pattr =
       (colorAttr >= 0 && !vattr) ? m_primAttr[colorAttr].get() : nullptr;
 
-  for (size_t p = 0; p < m_numPrims; p++) {
-    const size_t vi = m_index ? indexAt(*m_index, p, 1, 0) : p;
-    if (vi >= numVerts)
-      continue;
-    const float r = (vrad ? vrad[vi] : m_globalRadius) * rs;
-    if (!(r > 0.f))
-      continue;
+  // Fast path: positions used in place (no index, identity transform) and
+  // radius/validity needing no per-sphere work
+  const bool identity = xfm == mat4(linalg::identity);
+  const bool direct = !m_index && identity && m_numPrims <= numVerts;
+  const bool needRadii = vrad != nullptr && rs != 1.f;
 
-    float c[3], col[3];
-    xfmPoint(xfm, pos + 3 * vi, c);
-    if (vattr)
-      readColor(*vattr, vi, col);
-    else if (pattr)
-      readColor(*pattr, p, col);
-    scene.addSphere(style, c, r, (vattr || pattr) ? col : nullptr);
+  std::vector<float> tmpPos, tmpRad, tmpCol;
+  const float *outPos = pos;
+  const float *outRad = vrad;
+  bool compact = !direct; // need the gathered/transformed arrays
+
+  if (vrad && direct && !needRadii) {
+    for (size_t p = 0; p < m_numPrims && !compact; p++)
+      if (!(vrad[p] > 0.f))
+        compact = true;
   }
+  if (!vrad && !(m_globalRadius * rs > 0.f))
+    return;
+  if (needRadii)
+    compact = true;
+
+  if (compact) {
+    tmpPos.reserve(3 * m_numPrims);
+    if (vrad)
+      tmpRad.reserve(m_numPrims);
+    if (vattr || pattr)
+      tmpCol.reserve(3 * m_numPrims);
+    for (size_t p = 0; p < m_numPrims; p++) {
+      const size_t vi = m_index ? indexAt(*m_index, p, 1, 0) : p;
+      if (vi >= numVerts)
+        continue;
+      float r = 0.f;
+      if (vrad) {
+        r = vrad[vi] * rs;
+        if (!(r > 0.f))
+          continue;
+      }
+      float c[3];
+      xfmPoint(xfm, pos + 3 * vi, c);
+      tmpPos.insert(tmpPos.end(), c, c + 3);
+      if (vrad)
+        tmpRad.push_back(r);
+      if (vattr || pattr) {
+        float col[3];
+        readColor(vattr ? *vattr : *pattr, vattr ? vi : p, col);
+        tmpCol.insert(tmpCol.end(), col, col + 3);
+      }
+    }
+    outPos = tmpPos.data();
+    outRad = vrad ? tmpRad.data() : nullptr;
+    scene.addSpheres(style,
+        tmpPos.size() / 3,
+        outPos,
+        outRad,
+        m_globalRadius * rs,
+        tmpCol.empty() ? nullptr : tmpCol.data());
+    return;
+  }
+
+  // direct: only per-sphere colors still need converting
+  if (vattr || pattr) {
+    tmpCol.resize(3 * m_numPrims);
+    for (size_t p = 0; p < m_numPrims; p++)
+      readColor(vattr ? *vattr : *pattr, p, &tmpCol[3 * p]);
+  }
+  scene.addSpheres(style,
+      m_numPrims,
+      outPos,
+      outRad,
+      m_globalRadius * rs,
+      tmpCol.empty() ? nullptr : tmpCol.data());
 }
 
 bool Sphere::bounds(const mat4 &xfm, float3 &lo, float3 &hi) const
