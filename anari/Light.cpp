@@ -27,8 +27,7 @@ void DirectionalLight::commitParameters()
 
 void DirectionalLight::emit(TachyonScene &scene, const mat4 &xfm) const
 {
-  // ANARI's direction is where the light travels; Tachyon's directional
-  // light takes the same convention (verified empirically, see TachyonScene).
+  // ANARI's direction is where the light travels; Tachyon uses the same convention.
   const float4 d = linalg::mul(xfm, float4(m_direction, 0.f));
   float3 dir(d.x, d.y, d.z);
   const float len = linalg::length(dir);

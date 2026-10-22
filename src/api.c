@@ -971,11 +971,14 @@ void * rt_directional_light3fv(SceneHandle voidscene, void * tex,
 
 
 /* Re-aim an existing directional light (e.g. a camera-attached headlight)
- * without rebuilding the scene; 'dir' is the direction toward the light. */
+ * without rebuilding the scene; 'dir' is the direction the light travels,
+ * as for rt_directional_light(). */
 void rt_directional_light_set_direction(void * light, apivector dir) {
   directional_light * li = (directional_light *) light;
   VNorm(&dir);
-  li->dir = dir;
+  li->dir.x = -dir.x; /* stored negated, like newdirectionallight() */
+  li->dir.y = -dir.y;
+  li->dir.z = -dir.z;
 }
 
 

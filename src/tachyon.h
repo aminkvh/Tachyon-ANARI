@@ -611,7 +611,7 @@ void * rt_directional_light(SceneHandle, void *tex, apivector direction);
 void * rt_directional_light3fv(SceneHandle, void *tex, const float *direction);
 
 
-/** Re-aim an existing directional light (direction points toward the light). */
+/** Re-aim an existing directional light (direction the light travels). */
 void rt_directional_light_set_direction(void * light, apivector direction);
 
 /**

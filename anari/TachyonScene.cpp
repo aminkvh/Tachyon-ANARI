@@ -62,7 +62,9 @@ void TachyonScene::reset(bool lit, int numThreads)
   rt_outputfile(m_scene, ""); // never write image files from the device
   rt_verbose(m_scene, 0);
   rt_image_clamp(m_scene);
-  rt_normal_fixup_mode(m_scene, RT_NORMAL_FIXUP_FLIP);
+  // Keep the default "OFF": interpolated normals are flipped toward the viewer
+  // using the winding order, so addTriangle() makes normals agree with it.
+  rt_normal_fixup_mode(m_scene, RT_NORMAL_FIXUP_OFF);
   rt_camera_raydepth(m_scene, 8);
   rt_set_numthreads(m_scene, numThreads);
 
@@ -110,27 +112,37 @@ void TachyonScene::addTriangle(
   void *base = st.textures[0];
   m_numTriangles++;
 
-  if (c) {
-    float fn[9];
-    if (!n) { // vertex colors need normals: use the flat face normal
-      const float e1[3] = {p[3] - p[0], p[4] - p[1], p[5] - p[2]};
-      const float e2[3] = {p[6] - p[0], p[7] - p[1], p[8] - p[2]};
-      float nx = e1[1] * e2[2] - e1[2] * e2[1];
-      float ny = e1[2] * e2[0] - e1[0] * e2[2];
-      float nz = e1[0] * e2[1] - e1[1] * e2[0];
-      const float len = std::sqrt(nx * nx + ny * ny + nz * nz);
-      if (len > 0.f) {
-        nx /= len;
-        ny /= len;
-        nz /= len;
-      }
-      for (int i = 0; i < 3; i++) {
-        fn[3 * i + 0] = nx;
-        fn[3 * i + 1] = ny;
-        fn[3 * i + 2] = nz;
-      }
+  // Geometric normal from the winding order
+  const float e1[3] = {p[3] - p[0], p[4] - p[1], p[5] - p[2]};
+  const float e2[3] = {p[6] - p[0], p[7] - p[1], p[8] - p[2]};
+  float gx = e1[1] * e2[2] - e1[2] * e2[1];
+  float gy = e1[2] * e2[0] - e1[0] * e2[2];
+  float gz = e1[0] * e2[1] - e1[1] * e2[0];
+
+  float fn[9];
+  if (c && !n) { // vertex colors need normals: use the flat face normal
+    const float len = std::sqrt(gx * gx + gy * gy + gz * gz);
+    const float s = len > 0.f ? 1.f / len : 0.f;
+    for (int i = 0; i < 3; i++) {
+      fn[3 * i + 0] = gx * s;
+      fn[3 * i + 1] = gy * s;
+      fn[3 * i + 2] = gz * s;
+    }
+    n = fn;
+  } else if (n) {
+    // Tachyon orients interpolated normals by the winding order, so the
+    // supplied normals must agree with it
+    float d = 0.f;
+    for (int i = 0; i < 3; i++)
+      d += n[3 * i] * gx + n[3 * i + 1] * gy + n[3 * i + 2] * gz;
+    if (d < 0.f) {
+      for (int i = 0; i < 9; i++)
+        fn[i] = -n[i];
       n = fn;
     }
+  }
+
+  if (c) {
     // vertex colors live on a per-triangle texture copy
     void *tex = rt_texture_copy_vcstri(m_scene, base);
     st.textures.push_back(tex);
@@ -150,7 +162,7 @@ void TachyonScene::addDirectionalLight(const float *direction, const float *rgb)
   tex.col = col3(rgb);
   tex.opacity = 1.f;
   void *t = rt_texture(m_scene, &tex);
-  rt_directional_light(m_scene, t, vec3(direction));
+  rt_directional_light(m_scene, t, vec3(direction)); // same convention as ANARI
 }
 
 void TachyonScene::addPointLight(const float *position, const float *rgb)
@@ -264,7 +276,7 @@ void TachyonScene::setCamera(const SceneCamera &cam)
   rt_camera_position3fv(m_scene, cam.position, cam.direction, negUp);
 
   if (m_headlight) {
-    // headlight travels along the view direction
+    // headlight sits at the camera: it travels along the view direction
     rt_directional_light_set_direction(m_headlight, vec3(cam.direction));
   }
 }
