@@ -2,12 +2,15 @@ name: build
 
 on:
   push:
-    branches: [master, cpu-optimization]
+    branches: [master, cpu-optimization, anari-device]
     tags: ['v*']
   pull_request:
 
 permissions:
   contents: write
+
+env:
+  ANARI_SDK_REF: v0.16.0
 
 jobs:
   build:
@@ -56,9 +59,133 @@ jobs:
           name: tachyon-${{ matrix.name }}
           path: dist/tachyon-${{ matrix.name }}.tar.gz
 
+  anari:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            name: linux-x86_64
+          - os: macos-latest
+            name: macos-arm64
+          - os: windows-latest
+            name: windows-x86_64
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: ${{ matrix.os == 'windows-latest' && 'msys2 {0}' || 'bash' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - if: matrix.os == 'windows-latest'
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: UCRT64
+          install: >-
+            mingw-w64-ucrt-x86_64-gcc
+            mingw-w64-ucrt-x86_64-cmake
+            mingw-w64-ucrt-x86_64-ninja
+            mingw-w64-ucrt-x86_64-python
+
+      - name: Install Ninja
+        if: matrix.os != 'windows-latest'
+        run: |
+          if ! command -v ninja >/dev/null 2>&1; then
+            if [ "$RUNNER_OS" = "Linux" ]; then
+              sudo apt-get update && sudo apt-get install -y ninja-build
+            else
+              brew install ninja
+            fi
+          fi
+
+      - name: Resolve paths
+        run: |
+          # cygpath -m gives C:/... form for native Windows tools under MSYS2.
+          ROOT=$(cygpath -m "$PWD" 2>/dev/null || pwd)
+          echo "TACHYON_ROOT=$ROOT" >> "$GITHUB_ENV"
+          echo "ANARI_PREFIX=$ROOT/deps/anari-sdk/install" >> "$GITHUB_ENV"
+
+      - name: Restore ANARI-SDK cache
+        id: sdk-cache
+        uses: actions/cache@v4
+        with:
+          path: deps/anari-sdk/install
+          key: anari-sdk-${{ env.ANARI_SDK_REF }}-${{ matrix.os }}-v1
+
+      - name: Fetch ANARI-SDK source
+        if: steps.sdk-cache.outputs.cache-hit != 'true'
+        uses: actions/checkout@v4
+        with:
+          repository: KhronosGroup/ANARI-SDK
+          ref: ${{ env.ANARI_SDK_REF }}
+          path: deps/anari-sdk/src
+          fetch-depth: 1
+
+      - name: Build and install ANARI-SDK
+        if: steps.sdk-cache.outputs.cache-hit != 'true'
+        run: |
+          cmake -S deps/anari-sdk/src -B deps/anari-sdk/build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_INSTALL_PREFIX="$ANARI_PREFIX" \
+            -DBUILD_TESTING=ON \
+            -DBUILD_HELIDE_DEVICE=OFF \
+            -DBUILD_EXAMPLES=OFF \
+            -DBUILD_CTS=OFF \
+            -DBUILD_VIEWER=OFF
+          cmake --build deps/anari-sdk/build --parallel
+          cmake --install deps/anari-sdk/build
+
+      - name: Build tachyon ANARI device
+        run: |
+          args=(-S . -B build -G Ninja
+            -DCMAKE_BUILD_TYPE=Release
+            -DTACHYON_BUILD_ANARI=ON
+            "-DCMAKE_PREFIX_PATH=$ANARI_PREFIX")
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            # Keep the DLL free of MinGW runtime dependencies so MSVC hosts can load it.
+            args+=("-DCMAKE_SHARED_LINKER_FLAGS=-static-libgcc -static-libstdc++")
+          fi
+          cmake "${args[@]}"
+          cmake --build build --parallel
+
+      - name: Smoke test (anariRenderTests)
+        run: |
+          export PATH="$ANARI_PREFIX/bin:$TACHYON_ROOT/build/anari:$PATH"
+          export LD_LIBRARY_PATH="$ANARI_PREFIX/lib:$TACHYON_ROOT/build/anari${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+          export DYLD_LIBRARY_PATH="$ANARI_PREFIX/lib:$TACHYON_ROOT/build/anari${DYLD_LIBRARY_PATH:+:$DYLD_LIBRARY_PATH}"
+          mkdir -p render-out
+          cd render-out
+          if ! anariRenderTests --library tachyon > render.log 2>&1; then
+            cat render.log
+            echo "::error::anariRenderTests exited with a non-zero status"
+            exit 1
+          fi
+          cat render.log
+          if grep -q "failed to load" render.log; then
+            echo "::error::tachyon ANARI library did not load"
+            exit 1
+          fi
+          count=$(ls *.png 2>/dev/null | wc -l)
+          echo "PNG files written: $count"
+          test "$count" -ge 1
+
+      - name: Package
+        run: |
+          lib=$(find build/anari -maxdepth 1 -type f \( -name '*anari_library_tachyon.so' -o -name '*anari_library_tachyon.dylib' -o -name '*anari_library_tachyon.dll' \) | head -n 1)
+          test -n "$lib"
+          pkg=tachyon-anari-${{ matrix.name }}
+          mkdir -p dist/$pkg
+          cp "$lib" README.md LICENSE dist/$pkg/
+          cd dist && tar czf $pkg.tar.gz $pkg
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: tachyon-anari-${{ matrix.name }}
+          path: dist/tachyon-anari-${{ matrix.name }}.tar.gz
+
   release:
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: build
+    needs: [build, anari]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4
