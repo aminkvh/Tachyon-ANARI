@@ -1,0 +1,63 @@
+{
+  "info": {
+    "name": "TACHYON_DEVICE",
+    "type": "device",
+    "dependencies": [
+      "anari_core_1_0",
+      "anari_core_objects_base_1_0",
+      "khr_camera_orthographic",
+      "khr_camera_perspective",
+      "khr_geometry_triangle",
+      "khr_instance_transform",
+      "khr_light_directional",
+      "khr_light_point",
+      "khr_material_matte",
+      "khr_material_physicallyBased",
+      "khr_renderer_ambient_light",
+      "khr_renderer_background_color"
+    ]
+  },
+  "objects": [
+    {
+      "type": "ANARI_RENDERER",
+      "name": "default",
+      "parameters": [
+        {
+          "name": "pixelSamples",
+          "types": ["ANARI_INT32"],
+          "tags": [],
+          "default": 1,
+          "minimum": 1,
+          "maximum": 1024,
+          "description": "number of (jittered) samples per pixel; maps to Tachyon antialiasing"
+        },
+        {
+          "name": "ignoreAmbientLighting",
+          "types": ["ANARI_BOOL"],
+          "tags": [],
+          "default": true,
+          "description": "ignore 'ambientRadiance' and 'ambientColor' and use the built-in shading balance instead"
+        },
+        {
+          "name": "eyeLightBlendRatio",
+          "types": ["ANARI_FLOAT32"],
+          "tags": [],
+          "default": 0.5,
+          "minimum": 0.0,
+          "maximum": 1.0,
+          "description": "when the world has no lights: fraction of shading coming from the camera headlight"
+        }
+      ]
+    }
+  ],
+  "functions" : [
+    {
+      "name" : "anariNewTachyonDevice",
+      "returnType" : "ANARIDevice",
+      "arguments" : [
+        {"name" : "statusCallback", "type" : "ANARIStatusCallback", "default" : "0"},
+        {"name" : "statusCallbackUserData", "type" : "const void*", "default" : "0"}
+      ]
+    }
+  ]
+}

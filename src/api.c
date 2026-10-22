@@ -856,6 +856,15 @@ void rt_tex_transmode(void * voidtex, int transmode) {
 }
 
 
+/* Update the ambient and diffuse weights of an existing texture; cheap,
+ * needs no scene rebuild. */
+void rt_tex_shading(void * voidtex, flt ambient, flt diffuse) {
+  texture * tex = (texture *) voidtex;
+  tex->ambient = ambient;
+  tex->diffuse = diffuse;
+}
+
+
 void rt_tex_outline(void * voidtex, flt outline, flt outlinewidth) {
   texture * tex = (texture *) voidtex;
   tex->outline = outline;
@@ -952,6 +961,15 @@ void * rt_directional_light3fv(SceneHandle voidscene, void * tex,
   vector vdir;
   vdir.x = dir[0]; vdir.y = dir[1]; vdir.z = dir[2];
   return rt_directional_light(voidscene, tex, vdir);
+}
+
+
+/* Re-aim an existing directional light (e.g. a camera-attached headlight)
+ * without rebuilding the scene; 'dir' is the direction toward the light. */
+void rt_directional_light_set_direction(void * light, apivector dir) {
+  directional_light * li = (directional_light *) light;
+  VNorm(&dir);
+  li->dir = dir;
 }
 
 

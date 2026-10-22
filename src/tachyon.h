@@ -574,6 +574,9 @@ void rt_tex_phong(void * voidtex, flt phong, flt phongexp, int type);
  */
 void rt_tex_transmode(void * voidtex, int transmode);
 
+/** Set the ambient and diffuse weights of an existing texture. */
+void rt_tex_shading(void * voidtex, flt ambient, flt diffuse);
+
 /** Set edge cueing outline shading parameters for an existing texture. */
 void rt_tex_outline(void * voidtex, flt outline, flt outlinewidth); 
 
@@ -599,6 +602,9 @@ void * rt_directional_light(SceneHandle, void *tex, apivector direction);
  */
 void * rt_directional_light3fv(SceneHandle, void *tex, const float *direction);
 
+
+/** Re-aim an existing directional light (direction points toward the light). */
+void rt_directional_light_set_direction(void * light, apivector direction);
 
 /**
  * Define a spotlight with associated texture, center, radius, direction,
