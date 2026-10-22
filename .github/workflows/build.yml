@@ -166,6 +166,13 @@ jobs:
           cmake "${args[@]}"
           cmake --build build --parallel
 
+      - name: Name Windows device DLL for the ANARI loader
+        if: matrix.os == 'windows-latest'
+        run: |
+          # The ANARI loader on Windows opens anari_library_<name>.dll, but MinGW's
+          # CMake adds a "lib" prefix. Provide the expected name as well.
+          cp build/anari/libanari_library_tachyon.dll build/anari/anari_library_tachyon.dll
+
       - name: Smoke test (anariRenderTests)
         run: |
           # Use POSIX-form directories: bash cannot resolve mixed D:/ PATH entries under MSYS2.
@@ -193,7 +200,7 @@ jobs:
 
       - name: Package
         run: |
-          lib=$(find build/anari -maxdepth 1 -type f \( -name '*anari_library_tachyon.so' -o -name '*anari_library_tachyon.dylib' -o -name '*anari_library_tachyon.dll' \) | head -n 1)
+          lib=$(find build/anari -maxdepth 1 -type f \( -name 'libanari_library_tachyon.so' -o -name 'libanari_library_tachyon.dylib' -o -name 'anari_library_tachyon.dll' \) | head -n 1)
           test -n "$lib"
           pkg=tachyon-anari-${{ matrix.name }}
           mkdir -p dist/$pkg
