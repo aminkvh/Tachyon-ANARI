@@ -22,7 +22,9 @@ typedef struct {
 } texentry;
 
 typedef struct {
-  FILE * ifp;            /* current input file pointer */
+  char * buf;             /* whole current input file, read in one shot   */
+  long buflen;            /* length of buf, in bytes                      */
+  long bufpos;            /* current read cursor into buf                 */
   const char * filename; /* filename of current input file */
   texentry *textable;    /* texture lookup table */
   texentry defaulttex;   /* The default texture when a lookup fails */

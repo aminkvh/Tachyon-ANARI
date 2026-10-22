@@ -495,11 +495,66 @@ color cam_perspective_ray(ray * ry, flt x, flt y) {
  */
 color cam_aa_orthographic_ray(ray * ry, flt x, flt y) {
   color col, avcol;
-  int alias; 
+  int alias;
   scenedef * scene=ry->scene;
   float scale;
 
   col=cam_orthographic_ray(ry, x, y);   /* generate ray */
+
+  /* Adaptive path: stop taking samples, short of scene->antialiasing, once
+   * the running estimate of the mean's variance drops below a fixed
+   * threshold -- coherent regions (e.g. a smooth continuous surface under
+   * ambient occlusion, where every AA subsample re-triggers a full AO
+   * sample loop) converge in a handful of samples, so this is where the
+   * savings are concentrated; noisy/edge pixels still spend the full
+   * budget. Off by default -- see rt_adaptive_sampling(). */
+  if (scene->adaptive_sampling && scene->antialiasing > 0) {
+    color colsum, colsumsq;
+    const int minsamples = (scene->antialiasing < 6) ? scene->antialiasing : 6;
+    const flt maxvar = 0.0002;
+    flt rnsamples, ftmp, varr, varg, varb;
+
+    colsum = col;
+    colsumsq.r = col.r * col.r;
+    colsumsq.g = col.g * col.g;
+    colsumsq.b = col.b * col.b;
+
+    for (alias=1; alias <= scene->antialiasing; alias++) {
+      float jxy[2];
+      jitter_offset2f(&ry->randval, jxy);
+      avcol=cam_orthographic_ray(ry, x + jxy[0], y + jxy[1]);
+
+      colsum.r += avcol.r;
+      colsum.g += avcol.g;
+      colsum.b += avcol.b;
+      colsumsq.r += avcol.r * avcol.r;
+      colsumsq.g += avcol.g * avcol.g;
+      colsumsq.b += avcol.b * avcol.b;
+
+      if (alias + 1 >= minsamples) {
+        rnsamples = 1.0 / (alias + 1);
+        ftmp = colsum.r * rnsamples;
+        varr = ((colsumsq.r * rnsamples) - ftmp*ftmp) * rnsamples;
+        ftmp = colsum.g * rnsamples;
+        varg = ((colsumsq.g * rnsamples) - ftmp*ftmp) * rnsamples;
+        ftmp = colsum.b * rnsamples;
+        varb = ((colsumsq.b * rnsamples) - ftmp*ftmp) * rnsamples;
+
+        if ((varr < maxvar) && (varg < maxvar) && (varb < maxvar)) {
+          alias++; /* alias now equals the total sample count taken */
+          break;
+        }
+      }
+    }
+
+    /* alias equals total samples taken: antialiasing+1 on natural loop
+     * completion, or (loop index + 1) on the early-exit break above. */
+    scale = 1.0f / (flt) alias;
+    col.r = colsum.r * scale;
+    col.g = colsum.g * scale;
+    col.b = colsum.b * scale;
+    return col;
+  }
 
   /* perform antialiasing if enabled.                           */
   /* samples are run through a very simple box filter averaging */
@@ -514,8 +569,8 @@ color cam_aa_orthographic_ray(ray * ry, flt x, flt y) {
     col.b += avcol.b;
   }
 
-  /* average sample colors, back to range 0.0 - 1.0 */ 
-  scale = 1.0f / (scene->antialiasing + 1.0f); 
+  /* average sample colors, back to range 0.0 - 1.0 */
+  scale = 1.0f / (scene->antialiasing + 1.0f);
   col.r *= scale;
   col.g *= scale;
   col.b *= scale;

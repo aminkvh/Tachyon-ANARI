@@ -60,6 +60,8 @@
 #endif
 #include <windows.h>        /**< main Win32 APIs and types */
 #include <winbase.h>        /**< system services headers */
+#elif defined(_WIN32)
+#include <windows.h>        /**< MinGW: GetSystemInfo() for the CPU count */
 #endif
 
 #if defined(_AIX) || defined(_CRAY) || defined(__irix) || defined(__linux) || defined(__osf__) || defined(__sun)
@@ -107,11 +109,14 @@ int rt_thread_numphysprocessors(void) {
 #endif
 #endif
 
-#ifdef _MSC_VER
+/* _WIN32 too, not just _MSC_VER: MinGW builds (which use pthreads rather */
+/* than the Win32 thread APIs below) otherwise fall through to a=1 and    */
+/* silently render single-threaded by default.                            */
+#if defined(_MSC_VER) || defined(_WIN32)
   struct _SYSTEM_INFO sysinfo;
   GetSystemInfo(&sysinfo);
   a = sysinfo.dwNumberOfProcessors;  /**< total number of CPUs */
-#endif /* _MSC_VER */
+#endif /* _MSC_VER || _WIN32 */
 
 #if defined(__PARAGON__) 
   a=2; /**< Threads-capable Paragons have 2 CPUs for computation */

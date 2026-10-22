@@ -420,7 +420,11 @@ color shade_ambient_occlusion(ray * incident, const shadedata * shadevars) {
   /* with the surface normal, we could exceed the expected normalization */
   /* factor, but the results will be correctly clamped by the rest of    */
   /* shading code, so we don't worry about it here.                      */
-  flt lightscale = 2.0 / incident->scene->ambocc.numsamples;
+  int numsamples = incident->scene->ambocc.numsamples;
+  int adaptive = incident->scene->adaptive_sampling;
+  int minsamples = (numsamples < 6) ? numsamples : 6;
+  flt intensum = 0.0, intensumsq = 0.0;
+  flt lightscale;
 
   ambray.o=shadevars->hit;
   ambray.d=shadevars->N;
@@ -433,11 +437,12 @@ color shade_ambient_occlusion(ray * incident, const shadedata * shadevars) {
   } else {
     ambray.add_intersection = add_shadow_intersection;
   }
-  ambray.mbox = incident->mbox; 
+  ambray.mbox = incident->mbox;
   ambray.scene=incident->scene;         /* global scenedef info */
 
-  for (i=0; i<incident->scene->ambocc.numsamples; i++) {
+  for (i=0; i<numsamples; i++) {
     float dir[3];
+    flt sampleval;
     ambray.maxdist = FHUGE;         /* take any intersection */
     ambray.flags = RT_RAY_SHADOW;   /* shadow ray */
     ambray.serial++;
@@ -460,15 +465,37 @@ color shade_ambient_occlusion(ray * incident, const shadedata * shadevars) {
     intersect_objects(&ambray); /* trace the shadow ray */
 
     /* if no objects were hit, add an ambient contribution */
+    sampleval = 0.0;
     if (!shadow_intersection(&ambray)) {
       /* If the light isn't occluded, then we modulate it by any */
       /* transparent surfaces the shadow ray encountered, and    */
       /* proceed with illumination calculations                  */
-      ndotambl *= ambray.intstruct.shadowfilter;
+      sampleval = ndotambl * ambray.intstruct.shadowfilter;
+      inten += sampleval;
+    }
 
-      inten += ndotambl;
+    /* Adaptive early-exit: stop once the running estimate of the mean
+     * has converged below a fixed variance threshold. Off by default
+     * (see rt_adaptive_sampling()); a fully-lit or fully-occluded patch
+     * (every sample the same) converges in minsamples, while a partially
+     * occluded edge (high sample-to-sample variance, exactly where AO
+     * quality matters) keeps spending the full numsamples budget. */
+    if (adaptive) {
+      int taken = i + 1;
+      intensum += sampleval;
+      intensumsq += sampleval * sampleval;
+      if (taken >= minsamples) {
+        flt rn = 1.0 / taken;
+        flt mean = intensum * rn;
+        flt var = ((intensumsq * rn) - mean*mean) * rn;
+        if (var < 0.0002) {
+          numsamples = taken;
+          break;
+        }
+      }
     }
   }
+  lightscale = 2.0 / numsamples;
   ambcol.r = lightscale * inten * incident->scene->ambocc.col.r;
   ambcol.g = lightscale * inten * incident->scene->ambocc.col.g;
   ambcol.b = lightscale * inten * incident->scene->ambocc.col.b;

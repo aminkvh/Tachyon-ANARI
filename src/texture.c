@@ -27,8 +27,20 @@ static texture_methods standard_methods = {
   free_standard_texture
 };
 
-static texture_methods vcstri_methods = {
-  free
+/* new_vcstri_texture()'s objects are bump-allocated (see util.h's
+ * rt_bulkarena_alloc): a VMD-exported mesh creates one of these per
+ * triangle (per-vertex colors live on the texture, not the triangle --
+ * see tachyon.h's vcstri_texture), so this can be millions of allocations.
+ * Pre-existing behavior, unchanged by this: these were never individually
+ * freed anyway (rt_texture_copy_vcstri() never registers them in
+ * scene->texlist, unlike rt_texture()), so a no-op free changes nothing
+ * observable -- just the backing allocator. */
+static void vcstri_arena_noop_freetex(void * p) {
+  (void) p;
+}
+
+static texture_methods vcstri_arena_methods = {
+  vcstri_arena_noop_freetex
 };
 
 texture * new_texture(void) {
@@ -47,8 +59,8 @@ texture * new_standard_texture(void) {
 
 texture * new_vcstri_texture(void) {
   vcstri_texture * tex;
-  tex = (vcstri_texture *) malloc(sizeof(vcstri_texture));
-  tex->methods = &vcstri_methods;
+  tex = (vcstri_texture *) rt_bulkarena_alloc(sizeof(vcstri_texture));
+  tex->methods = &vcstri_arena_methods;
   return (texture *) tex;
 }
 

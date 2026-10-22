@@ -8,6 +8,7 @@
 #include <math.h>
 #include <string.h>
 #include <stdlib.h>
+#include <stdarg.h>
 #include <ctype.h> /* needed for toupper(), macro.. */
 
 #include "tachyon.h"  /* Tachyon ray tracer API */
@@ -20,26 +21,245 @@
 #include "parse.h" /* self protos */
 #undef PARSE_INTERNAL
 
-#define ERROR_READBUF_SIZE 65536
-
 /*
  * a is unknown compared string, b must be upper case already...)
  */
 static int stringcmp(const char * a, const char * b) {
-  int i, s, l;
-
-  s=strlen(a);
-  l=strlen(b);
-
-  if (s != l) 
-    return 1;
-
-  for (i=0; i<s; i++) {
-    if (toupper(a[i]) != b[i]) {
+  /* Single pass, ASCII-only uppercasing (identical to toupper() in the "C"
+   * locale) -- this runs for every keyword token, ~10 per triangle in a
+   * VCSTri mesh, so the two strlen()s and per-char CRT toupper() calls
+   * were measurable. */
+  for (; *a && *b; a++, b++) {
+    char c = *a;
+    if (c >= 'a' && c <= 'z')
+      c -= 'a' - 'A';
+    if (c != *b)
       return 1;
+  }
+  return (*a != *b);
+}
+
+/*
+ * Model files are read once, in full, into ph->buf, and every token is
+ * scanned directly out of that in-memory buffer rather than through
+ * stdio's fscanf(). For a ~400MB VMD-exported mesh (millions of floats
+ * and triangle indices, each previously its own fscanf() call), per-call
+ * fscanf overhead dominates parse time; a hand-rolled buffer scan of the
+ * same grammar (whitespace-delimited %s/%d/%f tokens -- the only
+ * conversions this parser ever uses, see the format strings below) is
+ * far cheaper per token. strtol()/strtof() are used for numbers so the
+ * conversions match what fscanf("%d"/"%f") would have produced.
+ */
+static int buf_loadfile(parsehandle * ph, const char * filename) {
+  FILE * fp;
+  long sz;
+
+  fp = fopen(filename, "rb");
+  if (fp == NULL) {
+    return -1;
+  }
+
+  fseek(fp, 0, SEEK_END);
+  sz = ftell(fp);
+  fseek(fp, 0, SEEK_SET);
+
+  /* +1 so strtol()/strtof() always have a non-digit byte to stop on, even
+   * if the last token in the file runs up to the final byte with no
+   * trailing whitespace. */
+  ph->buf = (char *) malloc(sz + 1);
+  if (ph->buf == NULL) {
+    fclose(fp);
+    return -1;
+  }
+
+  if (sz > 0 && fread(ph->buf, 1, sz, fp) != (size_t) sz) {
+    fclose(fp);
+    free(ph->buf);
+    ph->buf = NULL;
+    return -1;
+  }
+  fclose(fp);
+
+  ph->buf[sz] = '\0';
+  ph->buflen = sz;
+  ph->bufpos = 0;
+
+  return 0;
+}
+
+/* Same set as isspace() in the "C" locale, without the per-byte call into
+ * the CRT's locale-aware ctype table. */
+#define BUF_ISSPACE(c) ((c) == ' ' || ((c) >= '\t' && (c) <= '\r'))
+
+/*
+ * strtof() replacement for the common case of a plain decimal token
+ * ("-0.12345", "17", "3.") -- strtof() was ~60% of total parse time on a
+ * large VMD mesh. Clinger's fast path: when the decimal mantissa fits in
+ * 24 bits and the power-of-ten divisor is <= 1e10, both are exactly
+ * representable as floats, so a single IEEE float divide is correctly
+ * rounded and therefore bit-identical to strtof(). Anything else (more
+ * digits, exponents, hex, inf/nan, malformed input) falls back to strtof().
+ */
+static float buf_strtof(const char * s, char ** endp) {
+  static const float pow10f[] = { 1e0f, 1e1f, 1e2f, 1e3f, 1e4f, 1e5f,
+                                  1e6f, 1e7f, 1e8f, 1e9f, 1e10f };
+  const char * p = s;
+  unsigned int m = 0;
+  int neg = 0, ndigits = 0, nsig = 0, nfrac = 0;
+  float v;
+
+  if (*p == '-') {
+    neg = 1;
+    p++;
+  } else if (*p == '+') {
+    p++;
+  }
+
+  for (; *p >= '0' && *p <= '9'; p++, ndigits++) {
+    m = m * 10 + (*p - '0');
+    if (m != 0 && ++nsig > 9)
+      return strtof(s, endp);
+  }
+  if (*p == '.') {
+    for (p++; *p >= '0' && *p <= '9'; p++, ndigits++, nfrac++) {
+      m = m * 10 + (*p - '0');
+      if (m != 0 && ++nsig > 9)
+        return strtof(s, endp);
     }
   }
-  return 0;
+
+  /* no digits, an exponent/hex/inf/nan suffix, or out of exact range */
+  if (ndigits == 0 || nfrac > 10 || m > (1u << 24) ||
+      isalpha((unsigned char) *p) || *p == '.')
+    return strtof(s, endp);
+
+  *endp = (char *) p;
+  v = (float) m / pow10f[nfrac];
+  return neg ? -v : v;
+}
+
+static int buf_getc(parsehandle * ph) {
+  if (ph->bufpos >= ph->buflen) {
+    return EOF;
+  }
+  return (unsigned char) ph->buf[ph->bufpos++];
+}
+
+static void buf_skipws(parsehandle * ph) {
+  while (ph->bufpos < ph->buflen && BUF_ISSPACE(ph->buf[ph->bufpos])) {
+    ph->bufpos++;
+  }
+}
+
+/* Scans fmt for %s/%d/%f conversions (this file uses no others -- see the
+ * enumerated format strings in the git history for this change) against
+ * ph->buf, mimicking vfscanf()'s contract closely enough for every call
+ * site in this file: returns the number of conversions successfully
+ * assigned, or EOF if end of input is hit before the first one (the
+ * exact distinction GetObject() relies on to detect end-of-scene). */
+static int buf_vscanf(parsehandle * ph, const char * fmt, va_list ap) {
+  int nconv = 0;
+  int hiteof = 0;
+  const char * f = fmt;
+
+  while (*f) {
+    if (*f == '%') {
+      f++;
+      buf_skipws(ph);
+      if (ph->bufpos >= ph->buflen) {
+        hiteof = 1;
+        break;
+      }
+
+      if (*f == 's') {
+        char * dst = va_arg(ap, char *);
+        long start = ph->bufpos;
+        while (ph->bufpos < ph->buflen &&
+               !BUF_ISSPACE(ph->buf[ph->bufpos])) {
+          ph->bufpos++;
+        }
+        memcpy(dst, ph->buf + start, ph->bufpos - start);
+        dst[ph->bufpos - start] = '\0';
+        nconv++;
+      } else if (*f == 'd') {
+        char * endp;
+        long v = strtol(ph->buf + ph->bufpos, &endp, 10);
+        if (endp == ph->buf + ph->bufpos) {
+          break; /* matching failure, not EOF -- stop like fscanf would */
+        }
+        ph->bufpos = endp - ph->buf;
+        *(va_arg(ap, int *)) = (int) v;
+        nconv++;
+      } else if (*f == 'f') {
+        char * endp;
+        float v = buf_strtof(ph->buf + ph->bufpos, &endp);
+        if (endp == ph->buf + ph->bufpos) {
+          break;
+        }
+        ph->bufpos = endp - ph->buf;
+        *(va_arg(ap, float *)) = v;
+        nconv++;
+      }
+      f++;
+    } else {
+      f++; /* literal format chars are only ever whitespace in this file;
+            * buf_skipws() above already accounts for it */
+    }
+  }
+
+  if (nconv == 0 && hiteof) {
+    return EOF;
+  }
+  return nconv;
+}
+
+static int buf_scanf(parsehandle * ph, const char * fmt, ...) {
+  va_list ap;
+  int rc;
+  va_start(ap, fmt);
+  rc = buf_vscanf(ph, fmt, ap);
+  va_end(ap);
+  return rc;
+}
+
+/* Non-variadic fast paths for the highest-volume call sites (vertex
+ * coordinate/normal/color arrays and triangle facet indices -- tens of
+ * millions of tokens for a large VMD mesh): buf_scanf()'s va_list dispatch
+ * and per-call format-string walk are measurable overhead at that volume
+ * even though the underlying strtof()/strtol() work is identical. */
+static int buf_getfloat(parsehandle * ph, float * out) {
+  char * endp;
+  buf_skipws(ph);
+  if (ph->bufpos >= ph->buflen) return 0;
+  *out = buf_strtof(ph->buf + ph->bufpos, &endp);
+  if (endp == ph->buf + ph->bufpos) return 0;
+  ph->bufpos = endp - ph->buf;
+  return 1;
+}
+
+/* Non-variadic buf_scanf(ph, "%s", dst), for GetString()'s keywords. */
+static int buf_gettoken(parsehandle * ph, char * dst) {
+  long start;
+  buf_skipws(ph);
+  if (ph->bufpos >= ph->buflen) return 0;
+  start = ph->bufpos;
+  while (ph->bufpos < ph->buflen && !BUF_ISSPACE(ph->buf[ph->bufpos]))
+    ph->bufpos++;
+  memcpy(dst, ph->buf + start, ph->bufpos - start);
+  dst[ph->bufpos - start] = '\0';
+  return 1;
+}
+
+static int buf_getint(parsehandle * ph, int * out) {
+  char * endp;
+  long v;
+  buf_skipws(ph);
+  if (ph->bufpos >= ph->buflen) return 0;
+  v = strtol(ph->buf + ph->bufpos, &endp, 10);
+  if (endp == ph->buf + ph->bufpos) return 0;
+  ph->bufpos = endp - ph->buf;
+  *out = (int) v;
+  return 1;
 }
 
 static void reset_tex_table(parsehandle * ph, SceneHandle scene) {
@@ -166,50 +386,35 @@ static void Trans3d(apivector * trans, apivector * vec) {
   vec->z+=trans->z;
 }
 
-static void PrintSyntaxError(parsehandle * ph, 
+static void PrintSyntaxError(parsehandle * ph,
                              const char * string, const char * found) {
-  long streampos, readsize;
-  long i, j, linecount;
-  char cbuf[ERROR_READBUF_SIZE];
+  long streampos;
+  long j, linecount;
 
-  streampos = ftell(ph->ifp);
+  streampos = ph->bufpos;
 
-  /* count lines up to approximate position where error occured */ 
-  fseek(ph->ifp, 0, SEEK_SET); 
-
-  i=0;
-  linecount=0;
-  while (i < streampos) {
-    if ((streampos - i) > ERROR_READBUF_SIZE) {
-      readsize = ERROR_READBUF_SIZE;
-    } else {
-      readsize = streampos - i;
+  /* count lines up to approximate position where error occured */
+  linecount = 0;
+  for (j = 0; j < streampos; j++) {
+    if (ph->buf[j] == '\n') {
+      linecount++;
     }
-
-    fread(cbuf, readsize, 1, ph->ifp);
-    i+=readsize;
-    for (j=0; j<readsize; j++) {
-      if (cbuf[j] == '\n') {
-        linecount++;
-      }
-    } 
   }
 
   printf("Parse Error:\n");
-  printf("   Encountered a syntax error in file %s\n", ph->filename); 
+  printf("   Encountered a syntax error in file %s\n", ph->filename);
   printf("   Expected to find %s\n", string);
   printf("   Actually found: %s\n", found);
   printf("   Error occured at or prior to file offset %ld, line %ld\n",
          streampos, linecount);
   printf("   Error position is only approximate, but should be close\n\n");
-
-  fseek(ph->ifp, streampos, SEEK_SET); /* return to previous offset */
 }
 
 static errcode GetString(parsehandle * ph, const char * string) {
   char data[255];
 
-  fscanf(ph->ifp, "%s", data);
+  data[0] = '\0';
+  buf_gettoken(ph, data);
   if (stringcmp(data, string) != 0) {
     PrintSyntaxError(ph, string, data);
     return PARSEBADSYNTAX;
@@ -226,12 +431,11 @@ unsigned int readmodel(const char * modelfile, SceneHandle scene) {
   memset(&ph, 0, sizeof(ph));
   ph.transmode = RT_TRANS_ORIG;
   ph.filename = modelfile;
-  ph.ifp=fopen(modelfile, "r");
-  if (ph.ifp == NULL) {
+  if (buf_loadfile(&ph, modelfile) != 0) {
     return PARSEBADFILE;
   }
 
-  reset_tex_table(&ph, scene); 
+  reset_tex_table(&ph, scene);
 
   rc = PARSENOERR;
 
@@ -239,36 +443,36 @@ unsigned int readmodel(const char * modelfile, SceneHandle scene) {
   done = 0;
   while (!done) {
     char tmp[256];
-    fscanf(ph.ifp, "%s", tmp);
+    buf_scanf(&ph, "%s", tmp);
 
     if (!stringcmp(tmp, "BEGIN_SCENE")) {
       done=1;
     } else if (!stringcmp(tmp, "#")) {
       int c;
       while (1) {
-        c=fgetc(ph.ifp);
+        c=buf_getc(&ph);
         if (c == EOF || c == '\n') /* eat comment text */
           break;
       }
     } else {
-      fclose(ph.ifp);
+      free(ph.buf);
       return PARSEBADSYNTAX;
     }
   }
 
-  rc |= GetScenedefs(&ph, scene); 
-  
+  rc |= GetScenedefs(&ph, scene);
+
   if (rc == PARSENOERR) {
     ph.numobjectsparsed=0;
     while ((rc = GetObject(&ph, scene)) == PARSENOERR) {
       ph.numobjectsparsed++;
-    } 
-  
+    }
+
     if (rc == PARSEEOF)
       rc = PARSENOERR;
   }
 
-  fclose(ph.ifp);
+  free(ph.buf);
 
   free_tex_table(&ph, scene);
 
@@ -278,34 +482,39 @@ unsigned int readmodel(const char * modelfile, SceneHandle scene) {
 static errcode ReadIncludeFile(parsehandle * ph, const char * includefile, SceneHandle scene) {
   errcode rc;
   const char * oldfilename = ph->filename;
-  FILE * oldfp = ph->ifp;
+  char * oldbuf = ph->buf;
+  long oldbuflen = ph->buflen;
+  long oldbufpos = ph->bufpos;
 
   if (strcmp(includefile, ph->filename) == 0) {
-    printf("Warning: possible self-recursive include of file %s\n", 
+    printf("Warning: possible self-recursive include of file %s\n",
            includefile);
   }
 
   ph->filename=includefile;
-  ph->ifp=fopen(includefile, "r");
-  if (ph->ifp == NULL) {
+  if (buf_loadfile(ph, includefile) != 0) {
     printf("Parser failed trying to open file: %s\n", includefile);
 
     /* restore old file pointers etc */
     ph->filename=oldfilename;
-    ph->ifp = oldfp;
+    ph->buf = oldbuf;
+    ph->buflen = oldbuflen;
+    ph->bufpos = oldbufpos;
 
     return PARSEBADSUBFILE;
   }
 
   while ((rc = GetObject(ph, scene)) == PARSENOERR) {
     ph->numobjectsparsed++;
-  } 
-  fclose(ph->ifp);
+  }
+  free(ph->buf);
 
   /* restore old file pointers etc */
   ph->filename=oldfilename;
-  ph->ifp = oldfp;
-  
+  ph->buf = oldbuf;
+  ph->buflen = oldbuflen;
+  ph->bufpos = oldbufpos;
+
   if (rc == PARSEEOF){
     rc = PARSENOERR;
   }
@@ -318,7 +527,7 @@ static errcode GetScenedefs(parsehandle * ph, SceneHandle scene) {
   errcode rc = PARSENOERR;
 
   rc |= GetString(ph, "RESOLUTION");
-  fscanf(ph->ifp, "%d %d", &xres, &yres);
+  buf_scanf(ph, "%d %d", &xres, &yres);
 
   rt_outputfile(scene, "outfile.tga");
   rt_resolution(scene, xres, yres);
@@ -331,7 +540,7 @@ static errcode GetShaderMode(parsehandle * ph, SceneHandle scene) {
   errcode rc = PARSENOERR;
   char data[255];
 
-  fscanf(ph->ifp, "%s", data);
+  buf_gettoken(ph, data);
   if (!stringcmp(data, "FULL")) {
     rt_shadermode(scene, RT_SHADER_FULL);
   } else if (!stringcmp(data, "MEDIUM")) {
@@ -346,7 +555,7 @@ static errcode GetShaderMode(parsehandle * ph, SceneHandle scene) {
   }
 
   while (rc == PARSENOERR) {
-    fscanf(ph->ifp, "%s", data);
+    buf_gettoken(ph, data);
     if (!stringcmp(data, "END_SHADER_MODE")) {
       return rc;
     } else if (!stringcmp(data, "SHADOW_FILTER_ON")) {
@@ -355,7 +564,7 @@ static errcode GetShaderMode(parsehandle * ph, SceneHandle scene) {
       rt_shadow_filtering(scene, 0);
     } else if (!stringcmp(data, "TRANS_MAX_SURFACES")) {
       int transmaxsurf;
-      fscanf(ph->ifp, "%d", &transmaxsurf);
+      buf_scanf(ph, "%d", &transmaxsurf);
       rt_trans_max_surfaces(scene, transmaxsurf);
     } else if (!stringcmp(data, "TRANS_ORIG")) {
       ph->transmode = RT_TRANS_ORIG;       /* reset to standard mode */
@@ -374,13 +583,13 @@ static errcode GetShaderMode(parsehandle * ph, SceneHandle scene) {
       apicolor aoambient;
 
       rc |= GetString(ph, "AMBIENT_COLOR");
-      fscanf(ph->ifp, "%f %f %f", &aoambient.r, &aoambient.g, &aoambient.b);
+      buf_scanf(ph, "%f %f %f", &aoambient.r, &aoambient.g, &aoambient.b);
 
       rc |= GetString(ph, "RESCALE_DIRECT");
-      fscanf(ph->ifp, "%f", &aodirect);
+      buf_getfloat(ph, &aodirect);
 
       rc |= GetString(ph, "SAMPLES");
-      fscanf(ph->ifp, "%d", &aosamples);
+      buf_scanf(ph, "%d", &aosamples);
 
       rt_rescale_lights(scene, aodirect);
       rt_ambient_occlusion(scene, aosamples, aoambient);
@@ -401,9 +610,9 @@ static errcode GetCamera(parsehandle * ph, SceneHandle scene) {
   errcode rc = PARSENOERR;
   char data[255];
 
-  fscanf(ph->ifp, "%s", data);
+  buf_gettoken(ph, data);
   if (stringcmp(data, "PROJECTION") == 0) {
-    fscanf(ph->ifp, "%s", data);
+    buf_gettoken(ph, data);
     if (stringcmp(data, "FISHEYE") == 0) {
       rt_camera_projection(scene, RT_PROJECTION_FISHEYE);
     } else if (stringcmp(data, "PERSPECTIVE") ==0) {
@@ -412,10 +621,10 @@ static errcode GetCamera(parsehandle * ph, SceneHandle scene) {
       rt_camera_projection(scene, RT_PROJECTION_PERSPECTIVE_DOF);
 
       rc |= GetString(ph, "FOCALLENGTH");
-      fscanf(ph->ifp, "%f", &a);  
+      buf_getfloat(ph, &a);  
 
       rc |= GetString(ph, "APERTURE");
-      fscanf(ph->ifp, "%f", &b);  
+      buf_getfloat(ph, &b);  
 
       rt_camera_dof(scene, a, b);
     } else if (stringcmp(data, "ORTHOGRAPHIC") ==0) {
@@ -423,10 +632,10 @@ static errcode GetCamera(parsehandle * ph, SceneHandle scene) {
     }
 
     rc |= GetString(ph, "ZOOM");
-    fscanf(ph->ifp, "%f", &a);  
+    buf_getfloat(ph, &a);  
     zoom=a;
   } else if (stringcmp(data, "ZOOM") == 0) {
-    fscanf(ph->ifp, "%f", &a);
+    buf_getfloat(ph, &a);
     zoom=a;
   } else {
     rc = PARSEBADSYNTAX;
@@ -434,29 +643,29 @@ static errcode GetCamera(parsehandle * ph, SceneHandle scene) {
   }
 
   rc |= GetString(ph, "ASPECTRATIO");
-  fscanf(ph->ifp, "%f", &b);  
+  buf_getfloat(ph, &b);  
   aspectratio=b;
 
   rc |= GetString(ph, "ANTIALIASING");
-  fscanf(ph->ifp, "%d", &antialiasing);
+  buf_scanf(ph, "%d", &antialiasing);
 
   rc |= GetString(ph, "RAYDEPTH");
-  fscanf(ph->ifp, "%d", &raydepth);
+  buf_scanf(ph, "%d", &raydepth);
 
   rc |= GetString(ph, "CENTER");
-  fscanf(ph->ifp, "%f %f %f", &a, &b, &c);
+  (void) (buf_getfloat(ph, &a) && buf_getfloat(ph, &b) && buf_getfloat(ph, &c));
   Ccenter.x = a;
   Ccenter.y = b;
   Ccenter.z = c;
 
   rc |= GetString(ph, "VIEWDIR");
-  fscanf(ph->ifp, "%f %f %f", &a, &b, &c);
+  (void) (buf_getfloat(ph, &a) && buf_getfloat(ph, &b) && buf_getfloat(ph, &c));
   Cview.x = a;
   Cview.y = b;
   Cview.z = c;
 
   rc |= GetString(ph, "UPDIR");
-  fscanf(ph->ifp, "%f %f %f", &a, &b, &c);
+  (void) (buf_getfloat(ph, &a) && buf_getfloat(ph, &b) && buf_getfloat(ph, &c));
   Cup.x = a;
   Cup.y = b;
   Cup.z = c;
@@ -464,11 +673,11 @@ static errcode GetCamera(parsehandle * ph, SceneHandle scene) {
   rt_camera_setup(scene, zoom, aspectratio, antialiasing, raydepth,
                   Ccenter, Cview, Cup);
 
-  fscanf(ph->ifp, "%s", data);
+  buf_gettoken(ph, data);
   if (stringcmp(data, "FRUSTUM") == 0) {
-    fscanf(ph->ifp, "%f %f %f %f", &a, &b, &c, &d);
+    buf_scanf(ph, "%f %f %f %f", &a, &b, &c, &d);
     rt_camera_frustum(scene, a, b, c, d);
-    fscanf(ph->ifp, "%s", data);
+    buf_gettoken(ph, data);
     if (stringcmp(data, "END_CAMERA") != 0) {
       rc |= PARSEBADSYNTAX;
       return rc;
@@ -485,7 +694,7 @@ static errcode GetCamera(parsehandle * ph, SceneHandle scene) {
 static errcode GetObject(parsehandle * ph, SceneHandle scene) {
   char objtype[256];
  
-  if (fscanf(ph->ifp, "%s", objtype) == EOF) {
+  if (buf_scanf(ph, "%s", objtype) == EOF) {
     return PARSEEOF;
   }
   if (!stringcmp(objtype, "TRI")) {
@@ -573,7 +782,7 @@ static errcode GetObject(parsehandle * ph, SceneHandle scene) {
   if (!stringcmp(objtype, "#")) {
     int c;
     while (1) {
-      c=fgetc(ph->ifp);
+      c=buf_getc(ph);
       if (c == EOF || c == '\n')    /* eat comment text */
         return PARSENOERR;
     } 
@@ -589,7 +798,7 @@ static errcode GetObject(parsehandle * ph, SceneHandle scene) {
   }
   if (!stringcmp(objtype, "INCLUDE")) {
     char includefile[FILENAME_MAX];
-    fscanf(ph->ifp, "%s", includefile);
+    buf_gettoken(ph, includefile);
     return ReadIncludeFile(ph, includefile, scene);
   }
   if (!stringcmp(objtype, "START_CLIPGROUP")) {
@@ -609,7 +818,7 @@ static errcode GetObject(parsehandle * ph, SceneHandle scene) {
 
 static errcode GetInt(parsehandle * ph, int * i) {
   int a;
-  if (fscanf(ph->ifp, "%d", &a) != 1) 
+  if (buf_scanf(ph, "%d", &a) != 1) 
     return PARSEBADSYNTAX;
 
   *i = a;
@@ -620,7 +829,7 @@ static errcode GetInt(parsehandle * ph, int * i) {
 static errcode GetVector(parsehandle * ph, apivector * v1) {
   float a, b, c;
  
-  if (fscanf(ph->ifp, "%f %f %f", &a, &b, &c) != 3) 
+  if (!(buf_getfloat(ph, &a) && buf_getfloat(ph, &b) && buf_getfloat(ph, &c)))
     return PARSEBADSYNTAX;
 
   v1->x=a;
@@ -633,7 +842,7 @@ static errcode GetVector(parsehandle * ph, apivector * v1) {
 #if 0
 static errcode GetFloat(parsehandle * ph, apiflt * f) {
   float a;
-  if (fscanf(ph->ifp, "%f", &a) != 1) 
+  if (buf_scanf(ph, "%f", &a) != 1) 
     return PARSEBADSYNTAX;
 
   *f = a;
@@ -647,7 +856,7 @@ static errcode GetColor(parsehandle * ph, apicolor * c1) {
   int rc; 
 
   rc = GetString(ph, "COLOR"); 
-  fscanf(ph->ifp, "%f %f %f", &r, &g, &b);
+  (void) (buf_getfloat(ph, &r) && buf_getfloat(ph, &g) && buf_getfloat(ph, &b));
   c1->r=r;
   c1->g=g;
   c1->b=b;
@@ -662,7 +871,7 @@ static errcode GetImageDef(parsehandle * ph, SceneHandle scene) {
   unsigned char *rgb=NULL;
   int xres=0, yres=0, zres=0;
 
-  fscanf(ph->ifp, "%s", texname);
+  buf_gettoken(ph, texname);
 
   rc = GetString(ph, "FORMAT");
   rc |= GetString(ph, "RGB24");
@@ -686,7 +895,7 @@ static errcode GetImageDef(parsehandle * ph, SceneHandle scene) {
         int addr = ((z*xres*yres) + (y*xres) + x) * 3;
         int n=0;
 
-        fscanf(ph->ifp, "%s", clrstr);
+        buf_gettoken(ph, clrstr);
 
 	/* parse colors stored as triplets of hexadecimal values with   */
         /* either one, two, three, or four nibbles of significant bits, */
@@ -740,7 +949,7 @@ static errcode GetImageDef(parsehandle * ph, SceneHandle scene) {
 static errcode GetTexDef(parsehandle * ph, SceneHandle scene) {
   char texname[TEXNAMELEN];
 
-  fscanf(ph->ifp, "%s", texname);
+  buf_gettoken(ph, texname);
   add_texture(ph, GetTexBody(ph, scene, 0), texname); 
 
   return PARSENOERR;
@@ -750,8 +959,8 @@ static errcode GetTexAlias(parsehandle * ph) {
   char texname[TEXNAMELEN];
   char aliasname[TEXNAMELEN];
 
-  fscanf(ph->ifp, "%s", texname);
-  fscanf(ph->ifp, "%s", aliasname);
+  buf_gettoken(ph, texname);
+  buf_gettoken(ph, aliasname);
   add_texture(ph, find_texture(ph, aliasname), texname); 
 
   return PARSENOERR;
@@ -762,7 +971,7 @@ static errcode GetTexture(parsehandle * ph, SceneHandle scene, void ** tex) {
   char tmp[255];
   errcode rc = PARSENOERR;
 
-  fscanf(ph->ifp, "%s", tmp);
+  buf_gettoken(ph, tmp);
   if (!stringcmp(tmp, "TEXTURE")) {	
     *tex = GetTexBody(ph, scene, 0);
   }
@@ -791,39 +1000,39 @@ void * GetTexBody(parsehandle * ph, SceneHandle scene, int modeflag) {
   phongtype = RT_PHONG_PLASTIC;
 
   rc = GetString(ph, "AMBIENT");
-  fscanf(ph->ifp, "%f", &a); 
+  buf_getfloat(ph, &a); 
   tex.ambient=a;
 
   rc |= GetString(ph, "DIFFUSE");
-  fscanf(ph->ifp, "%f", &b);
+  buf_getfloat(ph, &b);
   tex.diffuse=b;
 
   rc |= GetString(ph, "SPECULAR");
-  fscanf(ph->ifp, "%f", &c);
+  buf_getfloat(ph, &c);
   tex.specular=c;
 
   rc |= GetString(ph, "OPACITY");
-  fscanf(ph->ifp, "%f", &d);  
+  buf_getfloat(ph, &d);  
   tex.opacity=d;
 
-  fscanf(ph->ifp, "%s", tmp);
+  buf_gettoken(ph, tmp);
   if (!stringcmp(tmp, "TRANSMODE")) {
-    fscanf(ph->ifp, "%s", tmp);
+    buf_gettoken(ph, tmp);
     if (!stringcmp(tmp, "R3D")) {
       transmode = RT_TRANS_RASTER3D;
     } 
-    fscanf(ph->ifp, "%s", tmp); /* read next item */
+    buf_gettoken(ph, tmp); /* read next item */
   }
 
   if (!stringcmp(tmp, "OUTLINE")) {
-    fscanf(ph->ifp, "%f", &outline);
+    buf_getfloat(ph, &outline);
     GetString(ph, "OUTLINE_WIDTH");
-    fscanf(ph->ifp, "%f", &outlinewidth);
-    fscanf(ph->ifp, "%s", tmp); /* read next item */
+    buf_getfloat(ph, &outlinewidth);
+    buf_gettoken(ph, tmp); /* read next item */
   }
 
   if (!stringcmp(tmp, "PHONG")) {
-    fscanf(ph->ifp, "%s", tmp);
+    buf_gettoken(ph, tmp);
     if (!stringcmp(tmp, "METAL")) {
       phongtype = RT_PHONG_METAL;
     }
@@ -834,10 +1043,10 @@ void * GetTexBody(parsehandle * ph, SceneHandle scene, int modeflag) {
       phongtype = RT_PHONG_PLASTIC;
     } 
 
-    fscanf(ph->ifp, "%f", &phong);
+    buf_getfloat(ph, &phong);
     GetString(ph, "PHONG_SIZE");
-    fscanf(ph->ifp, "%f", &phongexp);
-    fscanf(ph->ifp, "%s", tmp);
+    buf_getfloat(ph, &phongexp);
+    buf_gettoken(ph, tmp);
   } else { 
     /* assume we found "COLOR" otherwise */
   }
@@ -851,7 +1060,7 @@ void * GetTexBody(parsehandle * ph, SceneHandle scene, int modeflag) {
       rc |= PARSEBADSYNTAX;
     }
 
-    fscanf(ph->ifp, "%f %f %f", &a, &b, &c);
+    (void) (buf_getfloat(ph, &a) && buf_getfloat(ph, &b) && buf_getfloat(ph, &c));
     tex.col.r = a;
     tex.col.g = b;
     tex.col.b = c;
@@ -859,7 +1068,7 @@ void * GetTexBody(parsehandle * ph, SceneHandle scene, int modeflag) {
     rc |= GetString(ph, "TEXFUNC");
 
     /* this really ought to be a string, not a number... */
-    fscanf(ph->ifp, "%d", &tex.texturefunc);
+    buf_scanf(ph, "%d", &tex.texturefunc);
 
     switch (tex.texturefunc) {
       case RT_TEXTURE_CONSTANT:
@@ -882,7 +1091,7 @@ void * GetTexBody(parsehandle * ph, SceneHandle scene, int modeflag) {
 
       case RT_TEXTURE_CYLINDRICAL_IMAGE:
       case RT_TEXTURE_SPHERICAL_IMAGE:
-        fscanf(ph->ifp, "%s", tex.imap);
+        buf_scanf(ph, "%s", tex.imap);
         rc |= GetString(ph, "CENTER");
         rc |= GetVector(ph, &tex.ctr);
         rc |= GetString(ph, "ROTATE");
@@ -892,7 +1101,7 @@ void * GetTexBody(parsehandle * ph, SceneHandle scene, int modeflag) {
         break;
      
       case RT_TEXTURE_PLANAR_IMAGE:
-        fscanf(ph->ifp, "%s", tex.imap);
+        buf_scanf(ph, "%s", tex.imap);
         rc |= GetString(ph, "CENTER");
         rc |= GetVector(ph, &tex.ctr);
         rc |= GetString(ph, "ROTATE");
@@ -906,7 +1115,7 @@ void * GetTexBody(parsehandle * ph, SceneHandle scene, int modeflag) {
         break;
 
       case RT_TEXTURE_VOLUME_IMAGE:
-        fscanf(ph->ifp, "%s", tex.imap);
+        buf_scanf(ph, "%s", tex.imap);
         rc |= GetString(ph, "CENTER");
         rc |= GetVector(ph, &tex.ctr);
         rc |= GetString(ph, "ROTATE");
@@ -953,9 +1162,9 @@ static errcode GetDirLight(parsehandle * ph, SceneHandle scene) {
   rc = GetString(ph, "DIRECTION"); 
   rc |= GetVector(ph, &dir); 
 
-  fscanf(ph->ifp, "%s", tmp);
+  buf_gettoken(ph, tmp);
   if (!stringcmp(tmp, "COLOR")) {
-    fscanf(ph->ifp, "%f %f %f", &r, &g, &b);
+    (void) (buf_getfloat(ph, &r) && buf_getfloat(ph, &g) && buf_getfloat(ph, &b));
     tex.col.r=r;
     tex.col.g=g;
     tex.col.b=b;
@@ -980,12 +1189,12 @@ static errcode GetLight(parsehandle * ph, SceneHandle scene) {
   rc = GetString(ph, "CENTER"); 
   rc |= GetVector(ph, &ctr); 
   rc |= GetString(ph, "RAD");
-  fscanf(ph->ifp, "%f", &a);  /* read in radius */ 
+  buf_getfloat(ph, &a);  /* read in radius */ 
   rad=a;
 
-  fscanf(ph->ifp, "%s", tmp);
+  buf_gettoken(ph, tmp);
   if (!stringcmp(tmp, "COLOR")) {
-    fscanf(ph->ifp, "%f %f %f", &r, &g, &b);
+    (void) (buf_getfloat(ph, &r) && buf_getfloat(ph, &g) && buf_getfloat(ph, &b));
     tex.col.r=r;
     tex.col.g=g;
     tex.col.b=b;
@@ -997,13 +1206,13 @@ static errcode GetLight(parsehandle * ph, SceneHandle scene) {
       return -1;
 
     rc |= GetString(ph, "CONSTANT");
-    fscanf(ph->ifp, "%f", &a); 
+    buf_getfloat(ph, &a); 
     Kc=a;
     rc |= GetString(ph, "LINEAR");
-    fscanf(ph->ifp, "%f", &a); 
+    buf_getfloat(ph, &a); 
     Kl=a;
     rc |= GetString(ph, "QUADRATIC");
-    fscanf(ph->ifp, "%f", &a); 
+    buf_getfloat(ph, &a); 
     Kq=a;
     rc |= GetColor(ph, &tex.col);
 
@@ -1025,10 +1234,10 @@ static errcode GetSkyLight(parsehandle * ph, SceneHandle scene) {
   ambcol.b = 1.0;
 
   rc = GetString(ph, "NUMSAMPLES");
-  fscanf(ph->ifp, "%d", &numsamples);
+  buf_scanf(ph, "%d", &numsamples);
 
   rc |= GetString(ph, "COLOR");
-  fscanf(ph->ifp, "%f %f %f", &ambcol.r, &ambcol.g, &ambcol.b);
+  buf_scanf(ph, "%f %f %f", &ambcol.r, &ambcol.g, &ambcol.b);
 
   rt_ambient_occlusion(scene, numsamples, ambcol);
 
@@ -1051,21 +1260,21 @@ static errcode GetSpotLight(parsehandle * ph, SceneHandle scene) {
   rc = GetString(ph, "CENTER"); 
   rc |= GetVector(ph, &ctr); 
   rc |= GetString(ph,"RAD");
-  fscanf(ph->ifp, "%f", &a);  /* read in radius */ 
+  buf_getfloat(ph, &a);  /* read in radius */ 
   rad=a;
  
   rc |= GetString(ph, "DIRECTION"); 
   rc |= GetVector(ph, &direction); 
   rc |= GetString(ph, "FALLOFF_START");
-  fscanf(ph->ifp, "%f",&a);
+  buf_scanf(ph, "%f",&a);
   start=a;
   rc |= GetString(ph, "FALLOFF_END");
-  fscanf(ph->ifp, "%f", &a);
+  buf_getfloat(ph, &a);
   end=a;
    
-  fscanf(ph->ifp, "%s", tmp);
+  buf_gettoken(ph, tmp);
   if (!stringcmp(tmp, "COLOR")) {
-    fscanf(ph->ifp, "%f %f %f", &r, &g, &b);
+    (void) (buf_getfloat(ph, &r) && buf_getfloat(ph, &g) && buf_getfloat(ph, &b));
     tex.col.r=r;
     tex.col.g=g;
     tex.col.b=b;
@@ -1076,13 +1285,13 @@ static errcode GetSpotLight(parsehandle * ph, SceneHandle scene) {
     if (stringcmp(tmp, "ATTENUATION"))
       return -1;
     rc |= GetString(ph, "CONSTANT");
-    fscanf(ph->ifp, "%f", &a);
+    buf_getfloat(ph, &a);
     Kc=a;
     rc |= GetString(ph, "LINEAR");
-    fscanf(ph->ifp, "%f", &a);
+    buf_getfloat(ph, &a);
     Kl=a;
     rc |= GetString(ph, "QUADRATIC");
-    fscanf(ph->ifp, "%f", &a);
+    buf_getfloat(ph, &a);
     Kq=a;
     rc |= GetColor(ph, &tex.col);
 
@@ -1100,7 +1309,7 @@ static errcode GetFog(parsehandle * ph, SceneHandle scene) {
   float start, end, density;
   errcode rc = PARSENOERR;
  
-  fscanf(ph->ifp, "%s", tmp); 
+  buf_gettoken(ph, tmp); 
   if (!stringcmp(tmp, "LINEAR")) {
     rt_fog_mode(scene, RT_FOG_LINEAR);
   } else if (!stringcmp(tmp, "EXP")) {
@@ -1112,13 +1321,13 @@ static errcode GetFog(parsehandle * ph, SceneHandle scene) {
   }
 
   rc |= GetString(ph, "START");
-  fscanf(ph->ifp, "%f", &start);
+  buf_getfloat(ph, &start);
 
   rc |= GetString(ph, "END");
-  fscanf(ph->ifp, "%f", &end);
+  buf_getfloat(ph, &end);
 
   rc |= GetString(ph, "DENSITY");
-  fscanf(ph->ifp, "%f", &density);
+  buf_getfloat(ph, &density);
 
   rc |= GetColor(ph, &fogcol);
 
@@ -1132,7 +1341,7 @@ static errcode GetBackGnd(parsehandle * ph, SceneHandle scene) {
   float r,g,b;
   apicolor scenebackcol; 
   
-  fscanf(ph->ifp, "%f %f %f", &r, &g, &b);
+  (void) (buf_getfloat(ph, &r) && buf_getfloat(ph, &g) && buf_getfloat(ph, &b));
 
   scenebackcol.r=r;
   scenebackcol.g=g;
@@ -1149,7 +1358,7 @@ static errcode GetBackGndGradient(parsehandle * ph, SceneHandle scene) {
   float updir[3];
   int rc=0;
 
-  fscanf(ph->ifp, "%s", gradienttype); /* read next array type */
+  buf_gettoken(ph, gradienttype); /* read next array type */
 
   /* read vertex coordinates */
   if (!stringcmp(gradienttype, "SKY_SPHERE")) {
@@ -1163,19 +1372,19 @@ static errcode GetBackGndGradient(parsehandle * ph, SceneHandle scene) {
   }
 
   rc = GetString(ph, "UPDIR");
-  fscanf(ph->ifp, "%f %f %f", &updir[0], &updir[1], &updir[2]);
+  buf_scanf(ph, "%f %f %f", &updir[0], &updir[1], &updir[2]);
  
   rc |= GetString(ph, "TOPVAL");
-  fscanf(ph->ifp, "%f", &topval);
+  buf_getfloat(ph, &topval);
 
   rc |= GetString(ph, "BOTTOMVAL");
-  fscanf(ph->ifp, "%f", &botval);
+  buf_getfloat(ph, &botval);
  
   rc |= GetString(ph, "TOPCOLOR");
-  fscanf(ph->ifp, "%f %f %f", &topcol[0], &topcol[1], &topcol[2]);
+  buf_scanf(ph, "%f %f %f", &topcol[0], &topcol[1], &topcol[2]);
 
   rc |= GetString(ph, "BOTTOMCOLOR");
-  fscanf(ph->ifp, "%f %f %f", &botcol[0], &botcol[1], &botcol[2]);
+  buf_scanf(ph, "%f %f %f", &botcol[0], &botcol[1], &botcol[2]);
 
   rt_background_gradient(scene,
                          rt_vector(updir[0], updir[1], updir[2]),
@@ -1198,7 +1407,7 @@ static errcode GetCylinder(parsehandle * ph, SceneHandle scene) {
   rc |= GetString(ph, "AXIS");
   rc |= GetVector(ph, &axis);
   rc |= GetString(ph, "RAD");
-  fscanf(ph->ifp, "%f", &a);
+  buf_getfloat(ph, &a);
   rad=a;
 
   rc |= GetTexture(ph, scene, &tex);
@@ -1227,7 +1436,7 @@ static errcode GetFCylinder(parsehandle * ph, SceneHandle scene) {
   axis.z=pnt2.z - pnt1.z;
 
   rc |= GetString(ph, "RAD");
-  fscanf(ph->ifp, "%f", &a);
+  buf_getfloat(ph, &a);
   rad=a;
 
   rc |= GetTexture(ph, scene, &tex);
@@ -1245,7 +1454,7 @@ static errcode GetPolyCylinder(parsehandle * ph, SceneHandle scene) {
   errcode rc;
 
   rc = GetString(ph, "POINTS");
-  fscanf(ph->ifp, "%d", &numpts);
+  buf_scanf(ph, "%d", &numpts);
 
   temp = (apivector *) malloc(numpts * sizeof(apivector));
 
@@ -1254,7 +1463,7 @@ static errcode GetPolyCylinder(parsehandle * ph, SceneHandle scene) {
   }         
 
   rc |= GetString(ph, "RAD");
-  fscanf(ph->ifp, "%f", &a);
+  buf_getfloat(ph, &a);
   rad=a;
 
   rc |= GetTexture(ph, scene, &tex);
@@ -1276,7 +1485,7 @@ static errcode GetSphere(parsehandle * ph, SceneHandle scene) {
   rc = GetString(ph, "CENTER");
   rc |= GetVector(ph, &ctr); 
   rc |= GetString(ph, "RAD");
-  fscanf(ph->ifp, "%f", &a); 
+  buf_getfloat(ph, &a); 
   rad=a;
 
   rc |= GetTexture(ph, scene, &tex); 
@@ -1315,9 +1524,9 @@ static errcode GetVol(parsehandle * ph, SceneHandle scene) {
   rc |= GetString(ph, "MAX");
   rc |= GetVector(ph, &max);
   rc |= GetString(ph, "DIM");
-  fscanf(ph->ifp, "%d %d %d ", &x, &y, &z);
+  buf_scanf(ph, "%d %d %d ", &x, &y, &z);
   rc |= GetString(ph, "FILE");
-  fscanf(ph->ifp, "%s", fname);  
+  buf_gettoken(ph, fname);  
   rc |= GetTexture(ph, scene, &tex);
  
   rt_scalarvol(scene, tex, min, max, x, y, z, fname, NULL); 
@@ -1353,9 +1562,9 @@ static errcode GetRing(parsehandle * ph, SceneHandle scene) {
   rc |= GetString(ph, "NORMAL");
   rc |= GetVector(ph, &normal);
   rc |= GetString(ph, "INNER");
-  fscanf(ph->ifp, " %f ", &a);
+  buf_scanf(ph, " %f ", &a);
   rc |= GetString(ph, "OUTER");
-  fscanf(ph->ifp, " %f ", &b);
+  buf_scanf(ph, " %f ", &b);
   rc |= GetTexture(ph, scene, &tex);
  
   rt_ring(scene, tex, ctr, normal, a, b);
@@ -1441,19 +1650,19 @@ static errcode GetVCSTri(parsehandle * ph, SceneHandle scene) {
   rc |= GetVector(ph, &n2);
 
   rc |= GetString(ph, "C0");
-  fscanf(ph->ifp, "%f %f %f", &a, &b, &c);
+  (void) (buf_getfloat(ph, &a) && buf_getfloat(ph, &b) && buf_getfloat(ph, &c));
   c0.r = a;
   c0.g = b;
   c0.b = c;
 
   rc |= GetString(ph, "C1");
-  fscanf(ph->ifp, "%f %f %f", &a, &b, &c);
+  (void) (buf_getfloat(ph, &a) && buf_getfloat(ph, &b) && buf_getfloat(ph, &c));
   c1.r = a;
   c1.g = b;
   c1.b = c;
 
   rc |= GetString(ph, "C2");
-  fscanf(ph->ifp, "%f %f %f", &a, &b, &c);
+  (void) (buf_getfloat(ph, &a) && buf_getfloat(ph, &b) && buf_getfloat(ph, &c));
   c2.r = a;
   c2.g = b;
   c2.b = c;
@@ -1480,13 +1689,13 @@ static errcode GetSphereArray(parsehandle * ph, SceneHandle scene) {
   if (rc!= PARSENOERR)
     return rc;
 
-  fscanf(ph->ifp, "%s", arraytype); /* read next array type */
+  buf_gettoken(ph, arraytype); /* read next array type */
 
   /* read sphere coordinates */
   if (!stringcmp(arraytype, "CENTERS")) {
     v = (float *) malloc(spherecount * 3 * sizeof(float));
     for (i=0; i<spherecount * 3; i+=3) {
-      fscanf(ph->ifp, "%f %f %f", &v[i], &v[i+1], &v[i+2]); 
+      buf_scanf(ph, "%f %f %f", &v[i], &v[i+1], &v[i+2]); 
     }
   } else {
     printf("Expected sphere array centers block\n");
@@ -1495,13 +1704,13 @@ static errcode GetSphereArray(parsehandle * ph, SceneHandle scene) {
 
   /* use the default texture until we parse a subsequent texture command */
   tex = ph->defaulttex.tex; 
-  fscanf(ph->ifp, "%s", arraytype); /* read next array type */
+  buf_gettoken(ph, arraytype); /* read next array type */
 
   /* read sphere radii */
   if (!stringcmp(arraytype, "RADII")) {
     r = (float *) malloc(spherecount * sizeof(float));
     for (i=0; i<spherecount; i++) {
-      fscanf(ph->ifp, "%f", &r[i]); 
+      buf_scanf(ph, "%f", &r[i]); 
     }
   } else {
     printf("Expected sphere array radii block\n");
@@ -1512,7 +1721,7 @@ static errcode GetSphereArray(parsehandle * ph, SceneHandle scene) {
   if (!stringcmp(arraytype, "COLORS")) {
     c = (float *) malloc(spherecount * 3 * sizeof(float));
     for (i=0; i<spherecount * 3; i+=3) {
-      fscanf(ph->ifp, "%f %f %f", &c[i], &c[i+1], &c[i+2]); 
+      buf_scanf(ph, "%f %f %f", &c[i], &c[i+1], &c[i+2]); 
     }
   } else {
     printf("Expected sphere array colors block\n");
@@ -1557,15 +1766,15 @@ static errcode GetVertexArray(parsehandle * ph, SceneHandle scene) {
   if (rc!= PARSENOERR)
     return rc;
 
-  fscanf(ph->ifp, "%s", arraytype); /* read next array type */
+  buf_gettoken(ph, arraytype); /* read next array type */
 
   /* read vertex coordinates */
   if (!stringcmp(arraytype, "COORDS")) {
     v = (float *) malloc(vertexcount * 3 * sizeof(float));
     for (i=0; i<vertexcount * 3; i+=3) {
-      fscanf(ph->ifp, "%f %f %f", &v[i], &v[i+1], &v[i+2]); 
+      buf_getfloat(ph, &v[i]); buf_getfloat(ph, &v[i+1]); buf_getfloat(ph, &v[i+2]);
     }
-    fscanf(ph->ifp, "%s", arraytype); /* read next array type */
+    buf_gettoken(ph, arraytype); /* read next array type */
   } else {
     printf("Expected vertex array coords block\n");
     return PARSEBADSYNTAX;
@@ -1575,9 +1784,9 @@ static errcode GetVertexArray(parsehandle * ph, SceneHandle scene) {
   if (!stringcmp(arraytype, "NORMALS")) {
     n = (float *) malloc(vertexcount * 3 * sizeof(float));
     for (i=0; i<vertexcount * 3; i+=3) {
-      fscanf(ph->ifp, "%f %f %f", &n[i], &n[i+1], &n[i+2]); 
+      buf_getfloat(ph, &n[i]); buf_getfloat(ph, &n[i+1]); buf_getfloat(ph, &n[i+2]);
     }
-    fscanf(ph->ifp, "%s", arraytype); /* read next array type */
+    buf_gettoken(ph, arraytype); /* read next array type */
   } else {
     free(v);
     printf("Expected vertex array normals block\n");
@@ -1595,7 +1804,7 @@ static errcode GetVertexArray(parsehandle * ph, SceneHandle scene) {
     if (!stringcmp(arraytype, "COLORS")) {
       c = (float *) malloc(vertexcount * 3 * sizeof(float));
       for (i=0; i<vertexcount * 3; i+=3) {
-        fscanf(ph->ifp, "%f %f %f", &c[i], &c[i+1], &c[i+2]); 
+        buf_getfloat(ph, &c[i]); buf_getfloat(ph, &c[i+1]); buf_getfloat(ph, &c[i+2]);
       }
 #if 0
     } else if (!stringcmp(arraytype, "TEXCOORDS3")) {
@@ -1603,13 +1812,13 @@ static errcode GetVertexArray(parsehandle * ph, SceneHandle scene) {
       texmode = 3;
       t = (float *) malloc(vertexcount * 3 * sizeof(float));
       for (i=0; i<vertexcount * 3; i++) {
-        fscanf(ph->ifp, "%f %f %f", &t[i], &t[i+1], &t[i+2]); 
+        buf_scanf(ph, "%f %f %f", &t[i], &t[i+1], &t[i+2]); 
       }
     } else if (!stringcmp(arraytype, "TEXCOORDS2")) {
       texmode = 2;
       t = (float *) malloc(vertexcount * 2 * sizeof(float));
       for (i=0; i<vertexcount * 3; i++) {
-        fscanf(ph->ifp, "%f %f", &t[i], &t[i+1]); 
+        buf_scanf(ph, "%f %f", &t[i], &t[i+1]); 
       }
 #endif
     } else if (!stringcmp(arraytype, "TEXTURE")) {
@@ -1635,7 +1844,7 @@ static errcode GetVertexArray(parsehandle * ph, SceneHandle scene) {
 
       facets = (int *) malloc(numv * sizeof(int));
       for (i=0; i<numv; i++) {
-        fscanf(ph->ifp, "%d", &facets[i]); 
+        buf_getint(ph, &facets[i]);
       }
 
       /* render triangle strips one triangle at a time        */
@@ -1699,10 +1908,10 @@ static errcode GetVertexArray(parsehandle * ph, SceneHandle scene) {
       rc |= GetInt(ph, &numfacets);
       if (rc!= PARSENOERR)
         return PARSEBADSYNTAX;
-        
+
       facets = (int *) malloc(numfacets * 3 * sizeof(int));
       for (i=0; i<numfacets*3; i+=3) {
-        fscanf(ph->ifp, "%d %d %d", &facets[i], &facets[i+1], &facets[i+2]); 
+        buf_getint(ph, &facets[i]); buf_getint(ph, &facets[i+1]); buf_getint(ph, &facets[i+2]);
       }
 
       /* loop over all triangles in this mesh */
@@ -1763,7 +1972,7 @@ static errcode GetVertexArray(parsehandle * ph, SceneHandle scene) {
     }
 
     if (!done) {
-      fscanf(ph->ifp, "%s", arraytype); /* read next array type */
+      buf_gettoken(ph, arraytype); /* read next array type */
     }
   }  
 
@@ -1787,10 +1996,10 @@ static errcode GetLandScape(parsehandle * ph, SceneHandle scene) {
   errcode rc;
 
   rc = GetString(ph, "RES");
-  fscanf(ph->ifp, "%d %d", &m, &n);
+  buf_scanf(ph, "%d %d", &m, &n);
 
   rc |= GetString(ph, "SCALE");
-  fscanf(ph->ifp, "%f %f", &a, &b);   
+  buf_scanf(ph, "%f %f", &a, &b);   
   wx=a;
   wy=b;
 
@@ -1832,7 +2041,7 @@ static errcode GetTPolyFile(parsehandle * ph, SceneHandle scene) {
   rc |= GetVector(ph, &ctr);
 
   rc |= GetString(ph, "FILE");
-  fscanf(ph->ifp, "%s", ifname);
+  buf_gettoken(ph, ifname);
 
   rc |= GetTexture(ph, scene, &tex);
 
@@ -1876,7 +2085,7 @@ static errcode GetTPolyFile(parsehandle * ph, SceneHandle scene) {
 static errcode GetClipGroup(parsehandle * ph, SceneHandle scene) {
   char objtype[256];
 
-  if (fscanf(ph->ifp, "%s", objtype) == EOF) {
+  if (buf_scanf(ph, "%s", objtype) == EOF) {
     return PARSEEOF;
   }
 
@@ -1884,13 +2093,13 @@ static errcode GetClipGroup(parsehandle * ph, SceneHandle scene) {
     int numplanes, i; 
     float * planes;
 
-    if (fscanf(ph->ifp, "%d", &numplanes) != 1)
+    if (buf_scanf(ph, "%d", &numplanes) != 1)
       return PARSEBADSYNTAX;
 
     planes = (float *) malloc(numplanes * 4 * sizeof(float));
 
     for (i=0; i<(numplanes * 4); i++) {
-      if (fscanf(ph->ifp, "%f", &planes[i]) != 1)
+      if (buf_scanf(ph, "%f", &planes[i]) != 1)
         return PARSEBADSYNTAX;
     } 
 
@@ -1914,7 +2123,7 @@ static errcode GetClipGroupEnd(parsehandle * ph, SceneHandle scene) {
 static errcode GetMGFFile(parsehandle * ph, SceneHandle scene) {
   char ifname[255];
 
-  fscanf(ph->ifp, "%s", ifname); /* get MGF filename */
+  buf_gettoken(ph, ifname); /* get MGF filename */
   if (ParseMGF(ifname, scene, 0) == MGF_NOERR)
     return PARSENOERR;
   

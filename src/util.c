@@ -643,3 +643,52 @@ void jitter_sphere3f(rng_frand_handle *rngh, float *dir) {
 }
 
 
+/*
+ * Bump/arena allocator -- see util.h. Parsing is single-threaded (one
+ * scene is fully parsed, rendered, and torn down via rt_deletescene()
+ * before the next is started, even in multi-file batch runs -- see
+ * main.c), so a single global arena, reset at scene teardown, is safe.
+ */
+#define BULKARENA_CHUNK_SIZE (8 * 1024 * 1024)
+
+typedef struct bulkarena_chunk_t {
+  struct bulkarena_chunk_t * next;
+  size_t used;
+  size_t size;
+} bulkarena_chunk;
+
+static bulkarena_chunk * bulkarena_head = NULL;
+
+void * rt_bulkarena_alloc(size_t sz) {
+  size_t align = sizeof(void *);
+  char * base;
+  void * ptr;
+
+  sz = (sz + align - 1) & ~(align - 1); /* round up to pointer alignment */
+
+  if (bulkarena_head == NULL || (bulkarena_head->used + sz) > bulkarena_head->size) {
+    size_t chunksz = (sz > BULKARENA_CHUNK_SIZE) ? sz : BULKARENA_CHUNK_SIZE;
+    bulkarena_chunk * c = (bulkarena_chunk *) malloc(sizeof(bulkarena_chunk) + chunksz);
+    c->next = bulkarena_head;
+    c->used = 0;
+    c->size = chunksz;
+    bulkarena_head = c;
+  }
+
+  base = (char *) (bulkarena_head + 1);
+  ptr = base + bulkarena_head->used;
+  bulkarena_head->used += sz;
+  return ptr;
+}
+
+void rt_bulkarena_freeall(void) {
+  bulkarena_chunk * c = bulkarena_head;
+  while (c != NULL) {
+    bulkarena_chunk * next = c->next;
+    free(c);
+    c = next;
+  }
+  bulkarena_head = NULL;
+}
+
+

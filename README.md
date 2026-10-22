@@ -4,6 +4,17 @@ Tachyon is an efficient, parallelised raytracer, written by John Stone (http://w
 
 This was uploaded to GitHub as the download link has been broken recently. The original package README is given below.
 
+## About this fork
+
+All credit for Tachyon goes to John Stone. This fork adds performance work on top of 0.99b6:
+
+- **Windows/MinGW multithreading fix:** stock MinGW builds rendered on a single thread unless `-numthreads` was given, and now use all cores by default.
+- **Rendering:** flattened grid storage, cross-file inlining with LTO, precomputed cylinder/ring constants, and faster ambient-occlusion sampling. These give roughly 1.3–1.4× on the AO and lattice test scenes at the same thread count, and little change on sphere-heavy molecular scenes.
+- **Scene parsing:** the scene file is read into memory once and numbers are parsed with an exact fast path, about 7–10× faster on large triangle meshes.
+- **Opt-in options:** `-accel bvh` selects a BVH instead of the default grid. `-adaptive` stops antialiasing and AO sampling early (experimental and lossy). `-aosamples N` overrides the AO sample count.
+
+Output is byte-identical to stock on the test scenes, except for ambient-occlusion scenes, whose noise pattern differs (statistically equivalent) because of the new sampler. Speedups were measured on one Windows machine; see the git history for details. Build with `sh build_win/build.sh`.
+
 ```$Id: README,v 1.28 2013/04/21 19:32:42 johns Exp $```
 
 ## README for Tachyon(tm) Parallel/Multiprocessor Ray Tracing Software

@@ -13,8 +13,11 @@ typedef struct {
   int verbosemode;                  /**< verbose flags */
   int ray_maxdepth;                 /**< maximum ray recursion depth */
   int aa_maxsamples;                /**< antialiasing setting */
+  int ao_maxsamples;                /**< ambient occlusion sample count override, -1 = scene default */
   int boundmode;                    /**< bounding mode */
   int boundthresh;                  /**< bounding threshold */
+  int accelstruct;                  /**< RT_ACCEL_GRID/RT_ACCEL_BVH, or -1 for scene default */
+  int adaptive_sampling;            /**< 1 enables variance early-exit AA/AO */
   int usecamfile;                   /**< use camera file */
   char camfilename[FILENAME_MAX];   /**< camera filename */
   int shadermode;                   /**< quality level */

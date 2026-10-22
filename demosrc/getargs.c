@@ -99,6 +99,15 @@ static void printusage(char **argv) {
   printf("  -aasamples xxx  (maximum supersamples taken per pixel)\n");
   printf("                  (** default is 0, or scene file determined)\n");
   printf("\n");
+  printf("  -aosamples xxx  (ambient occlusion samples per hit point)\n");
+  printf("                  (** default: scene file determined)\n");
+  printf("\n");
+  printf("Acceleration Structure Options:\n");
+  printf("  -accel [grid | bvh]  (** default: grid)\n");
+  printf("\n");
+  printf("  -adaptive       (variance-based early exit for AA/AO sample loops)\n");
+  printf("                  (** default: off, always take the full sample count)\n");
+  printf("\n");
   printf("Output Options:\n");
   printf("  -res Xres Yres  override scene-defined output image size\n");
   printf("  -o outfile.tga  set output file name\n");
@@ -144,6 +153,9 @@ static void initoptions(argoptions * opt) {
   opt->verbosemode = -1;
   opt->ray_maxdepth = -1;
   opt->aa_maxsamples = -1;
+  opt->ao_maxsamples = -1;
+  opt->accelstruct = -1;
+  opt->adaptive_sampling = 0;
   opt->boundmode = -1; 
   opt->boundthresh = -1; 
   opt->usecamfile = -1;
@@ -305,6 +317,18 @@ int postsceneoptions(argoptions * opt, SceneHandle scene) {
     rt_camera_raydepth(scene, opt->ray_maxdepth);
   } 
 
+  if (opt->accelstruct != -1) {
+    rt_accelstruct(scene, opt->accelstruct);
+  }
+
+  if (opt->adaptive_sampling) {
+    rt_adaptive_sampling(scene, 1);
+  }
+
+  if (opt->ao_maxsamples != -1) {
+    rt_ao_maxsamples(scene, opt->ao_maxsamples);
+  }
+
   if (opt->aa_maxsamples != -1) {
     rt_aa_maxsamples(scene, opt->aa_maxsamples);
   } 
@@ -387,6 +411,24 @@ static int getparm(int argc, char **argv, int num, argoptions * opt, int node) {
   if (!strcmp(argv[num], "-aasamples")) {
     sscanf(argv[num + 1], "%d", &opt->aa_maxsamples);
     return 2;
+  }
+  if (!strcmp(argv[num], "-aosamples")) {
+    sscanf(argv[num + 1], "%d", &opt->ao_maxsamples);
+    return 2;
+  }
+  if (!strcmp(argv[num], "-accel")) {
+    if (!strcmp(argv[num + 1], "bvh")) {
+      opt->accelstruct = RT_ACCEL_BVH;
+    } else if (!strcmp(argv[num + 1], "grid")) {
+      opt->accelstruct = RT_ACCEL_GRID;
+    } else {
+      printf("Unknown -accel mode '%s', expected 'grid' or 'bvh'\n", argv[num + 1]);
+    }
+    return 2;
+  }
+  if (!strcmp(argv[num], "-adaptive")) {
+    opt->adaptive_sampling = 1;
+    return 1;
   }
   if (!strcmp(argv[num], "-V")) {
     /* turn verbose messages off */

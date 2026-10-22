@@ -112,8 +112,18 @@ void rt_aa_maxsamples(SceneHandle voidscene, int maxsamples) {
 
   if (maxsamples >= 0)
     scene->antialiasing=maxsamples;
-  else  
+  else
     scene->antialiasing=0;
+}
+
+/* Overrides just the ambient occlusion sample count, leaving whatever
+ * ambocc.col the scene file set alone (unlike rt_ambient_occlusion(),
+ * which sets both together and is what turns AO on in the first place). */
+void rt_ao_maxsamples(SceneHandle voidscene, int maxsamples) {
+  scenedef * scene = (scenedef *) voidscene;
+
+  if (maxsamples >= 0)
+    scene->ambocc.numsamples=maxsamples;
 }
 
 void rt_shadow_filtering(SceneHandle voidscene, int onoff) {
@@ -457,6 +467,18 @@ void rt_boundmode(SceneHandle voidscene, int mode) {
   scene->scenecheck = 1;
 }
 
+void rt_accelstruct(SceneHandle voidscene, int mode) {
+  scenedef * scene = (scenedef *) voidscene;
+  scene->accelstruct = mode;
+  scene->scenecheck = 1;
+}
+
+void rt_adaptive_sampling(SceneHandle voidscene, int mode) {
+  scenedef * scene = (scenedef *) voidscene;
+  scene->adaptive_sampling = mode;
+  scene->scenecheck = 1;
+}
+
 void rt_boundthresh(SceneHandle voidscene, int threshold) {
   scenedef * scene = (scenedef *) voidscene;
  
@@ -554,6 +576,7 @@ SceneHandle rt_newscene(void) {
   rt_boundmode(voidscene, RT_BOUNDING_ENABLED);   /* spatial subdivision on */
   rt_boundthresh(voidscene, BOUNDTHRESH);         /* default threshold      */
   scene->accelstruct = RT_ACCEL_GRID;             /* see tachyon.h for why  */
+  scene->adaptive_sampling = 0;                   /* off; see rt_adaptive_sampling */
   rt_camera_setup(voidscene, 1.0, 1.0, 0, 6,
                   rt_vector(0.0, 0.0, 0.0),
                   rt_vector(0.0, 0.0, 1.0),
@@ -658,6 +681,7 @@ void rt_deletescene(SceneHandle voidscene) {
     free(scene->cpuinfo);
     free_objects(scene->objgroup.boundedobj);
     free_objects(scene->objgroup.unboundedobj);
+    rt_bulkarena_freeall(); /* bulk-frees vcstri triangles/textures (see util.h) */
 
     free(scene);
   }

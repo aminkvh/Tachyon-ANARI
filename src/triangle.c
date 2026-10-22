@@ -43,8 +43,37 @@ static object_methods stri_methods_reverse = {
 static object_methods stri_methods_guess = {
   (void (*)(const void *, void *))(tri_intersect),
   (void (*)(const void *, const void *, const void *, void *))(stri_normal_guess),
-  tri_bbox, 
-  free 
+  tri_bbox,
+  free
+};
+
+/* newvcstri()'s objects are bump-allocated (see util.h's rt_bulkarena_alloc)
+ * since a VMD-exported mesh can create millions of them; unlike the
+ * stri_methods* tables above, these must never call libc free() on an
+ * individual object -- rt_deletescene() bulk-frees the whole arena instead. */
+static void vcstri_arena_noop_free(void * p) {
+  (void) p;
+}
+
+static object_methods vcstri_arena_methods = {
+  (void (*)(const void *, void *))(tri_intersect),
+  (void (*)(const void *, const void *, const void *, void *))(stri_normal),
+  tri_bbox,
+  vcstri_arena_noop_free
+};
+
+static object_methods vcstri_arena_methods_reverse = {
+  (void (*)(const void *, void *))(tri_intersect),
+  (void (*)(const void *, const void *, const void *, void *))(stri_normal_reverse),
+  tri_bbox,
+  vcstri_arena_noop_free
+};
+
+static object_methods vcstri_arena_methods_guess = {
+  (void (*)(const void *, void *))(tri_intersect),
+  (void (*)(const void *, const void *, const void *, void *))(stri_normal_guess),
+  tri_bbox,
+  vcstri_arena_noop_free
 };
 
 object * newtri(void * tex, vector v0, vector v1, vector v2) {
@@ -150,11 +179,11 @@ object * newvcstri(void * voidtex, vector v0, vector v1, vector v2,
       (VLength(&edge2) >= EPSILON) &&
       (VLength(&edge3) >= EPSILON)) {
 
-    t=(vcstri *) malloc(sizeof(vcstri));
+    t=(vcstri *) rt_bulkarena_alloc(sizeof(vcstri));
 
     t->nextobj = NULL;
-    t->methods = &stri_methods;
- 
+    t->methods = &vcstri_arena_methods;
+
     t->v0 = v0;
     t->edge1 = edge1;
     t->edge2 = edge2;
@@ -182,18 +211,18 @@ void vcstri_normal_fixup(object *otri, int mode) {
   switch (mode) {
 /*    case RT_NORMAL_FIXUP_GUESS: */
     case 2:
-      t->methods = &stri_methods_guess;
+      t->methods = &vcstri_arena_methods_guess;
       break;
 
 /*    case RT_NORMAL_FIXUP_FLIP: */
     case 1:
-      t->methods = &stri_methods_reverse;
+      t->methods = &vcstri_arena_methods_reverse;
       break;
 
 /*    case RT_NORMAL_FIXUP_OFF: */
     case 0:
     default:
-      t->methods = &stri_methods;
+      t->methods = &vcstri_arena_methods;
       break;
   }
 }

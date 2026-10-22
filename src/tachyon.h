@@ -173,6 +173,7 @@ void rt_crop_disable(SceneHandle);
 
 /** Sets the maximum number of supersamples to take for any pixel.  */
 void rt_aa_maxsamples(SceneHandle, int maxsamples);
+void rt_ao_maxsamples(SceneHandle, int maxsamples);
 
 /**
  * Enables or Disables verbose messages from the ray tracing library
@@ -349,17 +350,35 @@ void rt_shadow_filtering(SceneHandle, int mode);
  * tessellated triangles) but loses on dense-sphere molecular scenes --
  * Tachyon's primary real-world workload in VMD -- so it isn't the default.
  * See the git history around when bvh.c was added for the benchmark table.
- * Set scenedef.accelstruct directly (see rt_newscene() in api.c) to change
- * the default for your own workload; there's no runtime/CLI switch for it.
+ * Set scenedef.accelstruct directly (see rt_newscene() in api.c), or call
+ * rt_accelstruct() below (wired to the CLI as -accel grid|bvh), to change
+ * the default for your own workload.
  */
 #define RT_ACCEL_GRID 0
 #define RT_ACCEL_BVH  1
 
 /**
- * Enables or disable automatic generation and use of ray tracing 
- * acceleration data structures. 
+ * Enables or disable automatic generation and use of ray tracing
+ * acceleration data structures.
  */
 void rt_boundmode(SceneHandle, int mode);
+
+/**
+ * Selects which acceleration structure rt_boundmode()'s RT_BOUNDING_ENABLED
+ * builds: RT_ACCEL_GRID or RT_ACCEL_BVH.
+ */
+void rt_accelstruct(SceneHandle, int mode);
+
+/**
+ * Enables variance-based early-exit supersampling: antialiasing and
+ * ambient occlusion sample loops stop taking samples, up to the
+ * scene-defined maximum, once the running estimate has converged below a
+ * fixed variance threshold. Off by default -- with it off, both loops
+ * always take exactly their configured sample count, unchanged from
+ * upstream Tachyon. See camera.c's cam_aa_orthographic_ray() and
+ * shade.c's shade_ambient_occlusion().
+ */
+void rt_adaptive_sampling(SceneHandle, int mode);
 
 /** 
  * Set the threshold to be used when automatic generation of ray tracing
@@ -1098,6 +1117,8 @@ typedef struct {
   int transcount;            /**< maximum # transparent surfaces shown    */
   int shadowfilter;          /**< whether trans. surfaces filter lights   */
   int antialiasing;          /**< number of antialiasing rays to fire     */
+  int adaptive_sampling;     /**< variance-based early-exit for AA/AO,    */
+                              /**< off by default (see rt_adaptive_sampling)*/
   int verbosemode;           /**< verbose reporting flag                  */
   int boundmode;             /**< automatic spatial subdivision flag      */
   int boundthresh;           /**< threshold number of subobjects          */
