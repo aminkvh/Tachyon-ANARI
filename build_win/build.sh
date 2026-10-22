@@ -30,27 +30,35 @@ mkdir -p "$OBJDIR" "$BINDIR"
 # meant to run on whatever x86-64 CPU it's copied to, and -ffast-math
 # changes pixel values (unsafe FP reassociation), which fails the
 # byte-identical bar the rest of this optimization work is held to.
-BASE_CFLAGS="-m64 -O3 -flto -Wall -DUSEPOSIXTHREADS -DTHR -DUSEATOMICBARRIERS -D_REENTRANT -Isrc -Idemosrc"
+# Also builds on Linux and macOS (x86-64 or ARM64): only the linker libs
+# and executable name differ per platform.
+case "$(uname -s)" in
+  MINGW*|MSYS*|CYGWIN*) EXE=tachyon.exe; LIBS="-lpthread -lm -lws2_32" ;;
+  *)                    EXE=tachyon;     LIBS="-lpthread -lm" ;;
+esac
+CC="${CC:-gcc}"
+
+BASE_CFLAGS="-O3 -flto -Wall -DUSEPOSIXTHREADS -DTHR -DUSEATOMICBARRIERS -D_REENTRANT -Isrc -Idemosrc"
 CFLAGS="$BASE_CFLAGS $*"
 
 LIBSRCS="api apigeom box global hash parallel threads camera render trace grid bvh intersect sphere plane ring triangle cylinder quadric extvol vol ui util vector shade texture coordsys imap light imageio jpeg pngfile ppm psd sgirgb tgafile winbmp"
 DEMOSRCS="main getargs parse nffparse ac3dparse trackball"
 
 for f in $LIBSRCS; do
-  gcc $CFLAGS -c "src/$f.c" -o "$OBJDIR/$f.o"
+  $CC $CFLAGS -c "src/$f.c" -o "$OBJDIR/$f.o"
 done
 
 for f in $DEMOSRCS; do
-  gcc $CFLAGS -c "demosrc/$f.c" -o "$OBJDIR/$f.o"
+  $CC $CFLAGS -c "demosrc/$f.c" -o "$OBJDIR/$f.o"
 done
 
-gcc $CFLAGS -c build_win/stub_spaceball.c -o "$OBJDIR/stub_spaceball.o"
+$CC $CFLAGS -c build_win/stub_spaceball.c -o "$OBJDIR/stub_spaceball.o"
 
 ALLOBJS=""
 for f in $LIBSRCS $DEMOSRCS stub_spaceball; do
   ALLOBJS="$ALLOBJS $OBJDIR/$f.o"
 done
 
-gcc -m64 -O3 -flto $ALLOBJS -o "$BINDIR/tachyon.exe" -lpthread -lm -lws2_32
+$CC -O3 -flto $ALLOBJS -o "$BINDIR/$EXE" $LIBS
 
-echo "Built $BINDIR/tachyon.exe"
+echo "Built $BINDIR/$EXE"

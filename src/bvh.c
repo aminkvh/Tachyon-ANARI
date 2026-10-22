@@ -475,7 +475,13 @@ static int bvh_node_hit(const bvhnode * node, const vector * o,
   return (tmax >= MYMAX(tmin, 0.0)) && (tmin <= maxdist);
 }
 
-#if !defined(USESINGLEFLT)
+/* SSE2 pair test on x86-64 doubles only; other targets (e.g. ARM64 macOS)
+ * use the scalar bvh_node_hit() path, which gives identical results. */
+#if !defined(USESINGLEFLT) && (defined(__SSE2__) || defined(_M_X64))
+#define BVH_USE_SSE2 1
+#endif
+
+#if defined(BVH_USE_SSE2)
 /*
  * SIMD (SSE2, packed double) test of both an interior node's children at
  * once -- the exact near+far pair bvh_intersect does at every interior
@@ -542,7 +548,7 @@ static void bvh_node_hit_pair(const bvhnode * na, const bvhnode * nb,
     *tminb = tminarr[1];
   }
 }
-#endif /* !USESINGLEFLT */
+#endif /* BVH_USE_SSE2 */
 
 typedef struct {
   int idx;
@@ -604,7 +610,7 @@ static void bvh_intersect(const bvh * b, ray * ry) {
        * full box tests/ray, about half of them this exact redundant
        * retest, ~53% of total render time on a 60K-object scene. The
        * near+far test below is the other half -- see bvh_node_hit_pair(). */
-#if !defined(USESINGLEFLT)
+#if defined(BVH_USE_SSE2)
       bvh_node_hit_pair(&b->nodes[near], &b->nodes[far], &ry->o, &invd, ry->maxdist,
                          &hitnear, &neartmin, &hitfar, &fartmin);
 #else

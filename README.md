@@ -13,7 +13,7 @@ All credit for Tachyon goes to John Stone. This fork adds performance work on to
 - **Scene parsing:** the scene file is read into memory once and numbers are parsed with an exact fast path, about 7–10× faster on large triangle meshes.
 - **Opt-in options:** `-accel bvh` selects a BVH instead of the default grid. `-adaptive` stops antialiasing and AO sampling early (experimental and lossy). `-aosamples N` overrides the AO sample count.
 
-Output is byte-identical to stock on the test scenes, except for ambient-occlusion scenes, whose noise pattern differs (statistically equivalent) because of the new sampler. Speedups were measured on one Windows machine; see the git history for details. Build with `sh build_win/build.sh`.
+Output is byte-identical to stock on the test scenes, except for ambient-occlusion scenes, whose noise pattern differs (statistically equivalent) because of the new sampler. Speedups were measured on one Windows machine; see the git history for details. Build on Windows (MSYS2/MinGW), Linux or macOS with `sh build_win/build.sh`, or download binaries from the Releases page.
 
 ```$Id: README,v 1.28 2013/04/21 19:32:42 johns Exp $```
 
