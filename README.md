@@ -24,6 +24,7 @@ Tachyon can also be used as a [Khronos ANARI](https://www.khronos.org/anari) ren
 - `matte` materials, plus `physicallyBased` (approximated); color, opacity, metallic and roughness can come from attributes
 - directional and point lights
 - color and depth output
+- a renderer `mode` parameter: `default` (scene lights and shadows) or `eyeLight` (fast preview that ignores lights)
 
 Other geometry types are skipped with a warning.
 

@@ -209,6 +209,8 @@ jobs:
           Fork of John Stone's Tachyon 0.99b6, now also available as a Khronos ANARI rendering device.
 
           New in this release:
+          - ANARI device: images were offset by one pixel (pixels were sampled at their corner, not their center); fixed.
+          - ANARI device: renderer parameter `mode` = `eyeLight` adds a fast preview mode that ignores scene lights. With it, 91 of 97 runnable ANARI conformance (CTS) cases pass; the other 6 are 4 cylinder-cap cases where the reference device ignores `caps`, 1 bounds-dependent framing case, and 1 sampler case (samplers are not supported yet).
           - ANARI device: sphere and cylinder geometry. Large sphere sets are stored compactly with their own BVH; on a 1M-sphere scene the first frame takes about 0.16 s using 79 MB, comparable in time to the SDK's Embree-based reference device and with less memory.
           - ANARI device: material color, opacity, metallic and roughness can be driven by attributes. Opacity from per-vertex data is applied per triangle, not interpolated.
           - Experimental ANARI device (`tachyon-anari-*` archives): triangles, spheres and cylinders, perspective and orthographic cameras, matte and approximate physically based materials, directional and point lights, color and depth output. It is a small CPU-only library that needs only the ANARI SDK 0.16 loader. Other geometry types are skipped with a warning.
