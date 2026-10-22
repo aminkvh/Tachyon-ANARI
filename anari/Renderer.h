@@ -15,6 +15,9 @@ struct Renderer : public Object
 
   const float4 &background() const { return m_background; }
   int pixelSamples() const { return m_pixelSamples; }
+  // "eyeLight" preview mode: application lights are ignored and surfaces are
+  // shaded with the camera headlight blended with ambient (see Renderer.cpp).
+  bool eyeLight() const { return m_eyeLight; }
 
   // Weights used for the surface shading, see Renderer.cpp.
   // 'lit': the world contains application lights.
@@ -27,6 +30,7 @@ struct Renderer : public Object
   float3 m_ambientColor{1.f, 1.f, 1.f};
   bool m_ignoreAmbient{false};
   float m_eyeLightBlend{0.5f};
+  bool m_eyeLight{false};
 };
 
 } // namespace tachyon_anari

@@ -151,11 +151,14 @@ void Frame::rebuildScene(helium::TimeStamp sceneStamp)
   std::vector<LightInstance> lights;
   m_world->collect(surfaces, lights);
 
-  m_lit = !lights.empty();
+  m_lit = !lights.empty() && !m_renderer->eyeLight();
+  m_builtEyeLight = m_renderer->eyeLight();
   m_scene.reset(m_lit, state->numThreads);
 
-  for (auto &li : lights)
-    li.light->emit(m_scene, li.xfm);
+  if (m_lit) {
+    for (auto &li : lights)
+      li.light->emit(m_scene, li.xfm);
+  }
 
   for (auto &si : surfaces) {
     const Geometry *g = si.surface->geometry();
@@ -208,9 +211,11 @@ void Frame::rebuildScene(helium::TimeStamp sceneStamp)
       // them like the color: instance, then vertex/primitive (per primitive,
       // below), then uniform. An attribute that is not set reads (0,0,0,1).
       Material::Scalars sc = m->scalars();
-      const int sattr[3] = {m->opacityAttribute(),
-          m->metallicAttribute(),
-          m->roughnessAttribute()};
+      // (the eyeLight preview ignores all three)
+      const bool preview = m_renderer->eyeLight();
+      const int sattr[3] = {preview ? -1 : m->opacityAttribute(),
+          preview ? -1 : m->metallicAttribute(),
+          preview ? -1 : m->roughnessAttribute()};
       float *sval[3] = {&sc.opacity, &sc.metallic, &sc.roughness};
       int perPrim[3] = {-1, -1, -1};
       unsigned mask = 0;
@@ -248,7 +253,7 @@ void Frame::rebuildScene(helium::TimeStamp sceneStamp)
           b->attr[i] = perPrim[i];
         b->attrMask = mask;
         binder = std::move(b);
-      } else if (!m->fillStyle(style, colorAlpha, &sc)) {
+      } else if (!m->fillStyle(style, colorAlpha, &sc, preview)) {
         continue; // fully transparent
       }
     }
@@ -309,7 +314,8 @@ void Frame::renderFrame()
 
   // Rebuild geometry + acceleration structure only when scene objects changed
   const helium::TimeStamp sceneStamp = state->sceneStamp.load();
-  if (!m_sceneValid || m_builtWorld != m_world.ptr || sceneStamp > m_builtStamp)
+  if (!m_sceneValid || m_builtWorld != m_world.ptr || sceneStamp > m_builtStamp
+      || m_builtEyeLight != m_renderer->eyeLight())
     rebuildScene(sceneStamp);
 
   // Renderer changes only touch cheap shading weights

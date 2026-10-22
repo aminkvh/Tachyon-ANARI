@@ -343,17 +343,20 @@ void TachyonScene::setCamera(const SceneCamera &cam)
       : 0.5f / std::tan(0.5f * cam.fovy);
   rt_camera_zoom(m_scene, zoom); // also resets the frustum to automatic
 
+  // Tachyon numbers pixels from 1 and shoots each ray through the pixel's
+  // lower-left corner, so with the default frustum the image comes out one
+  // pixel too far to the left compared to ANARI (verified against helide with
+  // the CTS). Shift the frustum by one pixel to compensate. The frustum is
+  // the (aspect / zoom) x (1 / zoom) image plane, cropped to the image region;
+  // Tachyon's vertical axis is flipped relative to ANARI's (see below).
   const float *r = cam.region;
-  if (r[0] != 0.f || r[1] != 0.f || r[2] != 1.f || r[3] != 1.f) {
-    // image plane is (aspect / zoom) x (1 / zoom); Tachyon's vertical axis is
-    // flipped relative to ANARI's (see below)
-    const float pw = aspect / zoom, ph = 1.f / zoom;
-    rt_camera_frustum(m_scene,
-        (r[0] - 0.5f) * pw,
-        (r[2] - 0.5f) * pw,
-        (0.5f - r[3]) * ph,
-        (0.5f - r[1]) * ph);
-  }
+  const float pw = aspect / zoom, ph = 1.f / zoom;
+  const float pixelW = (r[2] - r[0]) * pw / float(m_width > 0 ? m_width : 1);
+  rt_camera_frustum(m_scene,
+      (r[0] - 0.5f) * pw - pixelW,
+      (r[2] - 0.5f) * pw - pixelW,
+      (0.5f - r[3]) * ph,
+      (0.5f - r[1]) * ph);
 
   // Tachyon's camera basis is left-handed (right = up x view) while ANARI's
   // is right-handed (right = view x up). Negating 'up' flips Tachyon's right

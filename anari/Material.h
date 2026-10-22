@@ -43,9 +43,13 @@ struct Material : public Object
   // geometry). 'scalars' (may be nullptr) replaces the constant opacity,
   // metallic and roughness values, e.g. with attribute values. Returns false
   // when the surface is fully transparent.
+  // 'preview' (the renderer's eyeLight mode) shades the plain color only:
+  // opacity, alpha mode and the physically based terms are ignored, as in
+  // helide's default renderer.
   bool fillStyle(SurfaceStyle &style,
       float colorAlpha,
-      const Scalars *scalars = nullptr) const;
+      const Scalars *scalars = nullptr,
+      bool preview = false) const;
 
  protected:
   float3 m_color{1.f, 1.f, 1.f};

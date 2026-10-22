@@ -82,13 +82,18 @@ void Material::readCommon(const char *colorName)
 }
 
 bool Material::fillStyle(
-    SurfaceStyle &s, float colorAlpha, const Scalars *sc) const
+    SurfaceStyle &s, float colorAlpha, const Scalars *sc, bool preview) const
 {
   const Scalars v = sc ? *sc : scalars();
   if (m_colorAttribute < 0) {
     s.color[0] = m_color.x;
     s.color[1] = m_color.y;
     s.color[2] = m_color.z;
+  }
+
+  if (preview) {
+    s.opacity = 1.f;
+    return true;
   }
 
   float alpha = v.opacity * colorAlpha;

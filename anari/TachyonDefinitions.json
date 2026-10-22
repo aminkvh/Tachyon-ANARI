@@ -34,6 +34,14 @@
           "description": "number of (jittered) samples per pixel; maps to Tachyon antialiasing"
         },
         {
+          "name": "mode",
+          "types": ["ANARI_STRING"],
+          "tags": [],
+          "default": "default",
+          "values": ["default", "eyeLight"],
+          "description": "'default': shade with the world's lights (or a camera headlight if there are none). 'eyeLight': cheap preview like helide's default renderer: lights are ignored, no shadow rays; color * ambientRadiance * ((1-blend) + blend*|N.V|) with blend = eyeLightBlendRatio, ambientColor unused, ignoreAmbientLighting defaulting to true"
+        },
+        {
           "name": "ignoreAmbientLighting",
           "types": ["ANARI_BOOL"],
           "tags": [],

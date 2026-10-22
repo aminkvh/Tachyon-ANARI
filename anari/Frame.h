@@ -68,6 +68,7 @@ struct Frame : public helium::BaseFrame
   TachyonScene m_scene;
   bool m_sceneValid{false};
   bool m_lit{false};
+  bool m_builtEyeLight{false};
   helium::TimeStamp m_builtStamp{0};
   const World *m_builtWorld{nullptr};
   const Renderer *m_shadedWith{nullptr};
