@@ -61,3 +61,9 @@ install(TARGETS anari_library_tachyon
   LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
   RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
   ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR})
+
+# The ANARI loader opens anari_library_<name>.dll on Windows; MinGW would
+# otherwise add a "lib" prefix.
+if(WIN32)
+  set_target_properties(anari_library_tachyon PROPERTIES PREFIX "")
+endif()
