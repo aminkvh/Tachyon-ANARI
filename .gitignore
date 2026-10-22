@@ -20,6 +20,7 @@ build_win/*.py
 build_win/sidebyside/
 build_win/prof/
 build_wsl/
+build/
 gmon.out
 graphify-out/
 t.dat

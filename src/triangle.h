@@ -7,7 +7,7 @@
 object * newtri(void *, vector, vector, vector);
 object * newstri(void *, vector, vector, vector, vector, vector, vector);
 void stri_normal_fixup(object *, int mode);
-object * newvcstri(void *, vector, vector, vector, vector, vector, vector,
+object * newvcstri(rt_bulkarena *, void *, vector, vector, vector, vector, vector, vector,
                    color, color, color);
 void vcstri_normal_fixup(object *, int mode);
 color vcstri_color(const vector * hit, const texture * tex, const ray * incident);

@@ -108,12 +108,17 @@ void jitter_offset2f(unsigned int *pval, float *xy);
 void jitter_disc2f(unsigned int *pval, float *xy);
 void jitter_sphere3f(rng_frand_handle *rngh, float *dir);
 
-/* Bump/arena allocator for objects with scene lifetime that are only ever
- * freed in bulk, never individually -- see triangle.c's newvcstri() and
- * texture.c's new_vcstri_texture(), which is where a VMD-exported mesh's
- * millions of per-triangle allocations were previously many individual
- * malloc() calls. rt_bulkarena_freeall() is called from rt_deletescene(). */
-void * rt_bulkarena_alloc(size_t sz);
-void rt_bulkarena_freeall(void);
+/* Per-scene bump/arena allocator for objects with scene lifetime that are
+ * only ever freed in bulk, never individually -- see triangle.c's
+ * newvcstri() and texture.c's new_vcstri_texture(), which is where a
+ * VMD-exported mesh's millions of per-triangle allocations were previously
+ * many individual malloc() calls. Each scenedef owns one arena (zeroed by
+ * rt_newscene()); rt_bulkarena_freeall() is called from rt_deletescene(). */
+typedef struct rt_bulkarena_t {
+  void * head;   /* private chunk list, managed by util.c */
+} rt_bulkarena;
+
+void * rt_bulkarena_alloc(rt_bulkarena * a, size_t sz);
+void rt_bulkarena_freeall(rt_bulkarena * a);
 
 #endif

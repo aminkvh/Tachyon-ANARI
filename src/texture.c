@@ -57,9 +57,9 @@ texture * new_standard_texture(void) {
   return (texture *) tex;
 }
 
-texture * new_vcstri_texture(void) {
+texture * new_vcstri_texture(rt_bulkarena * arena) {
   vcstri_texture * tex;
-  tex = (vcstri_texture *) rt_bulkarena_alloc(sizeof(vcstri_texture));
+  tex = (vcstri_texture *) rt_bulkarena_alloc(arena, sizeof(vcstri_texture));
   tex->methods = &vcstri_arena_methods;
   return (texture *) tex;
 }

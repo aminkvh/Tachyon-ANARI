@@ -163,7 +163,7 @@ void stri_normal_fixup(object *otri, int mode) {
 }
 
 
-object * newvcstri(void * voidtex, vector v0, vector v1, vector v2,
+object * newvcstri(rt_bulkarena * arena, void * voidtex, vector v0, vector v1, vector v2,
                    vector n0, vector n1, vector n2,
                    color c0, color c1, color c2) {
   vcstri * t;
@@ -179,7 +179,7 @@ object * newvcstri(void * voidtex, vector v0, vector v1, vector v2,
       (VLength(&edge2) >= EPSILON) &&
       (VLength(&edge3) >= EPSILON)) {
 
-    t=(vcstri *) rt_bulkarena_alloc(sizeof(vcstri));
+    t=(vcstri *) rt_bulkarena_alloc(arena, sizeof(vcstri));
 
     t->nextobj = NULL;
     t->methods = &vcstri_arena_methods;

@@ -1124,6 +1124,7 @@ typedef struct {
   int boundthresh;           /**< threshold number of subobjects          */
   int accelstruct;           /**< RT_ACCEL_GRID or RT_ACCEL_BVH           */
   list * texlist;            /**< linked list of texture objects          */
+  rt_bulkarena objarena;     /**< bulk arena for vcstri objs and textures */
   list * cliplist;           /**< linked list of clipping plane groups    */
   unsigned int flags;        /**< scene feature requirement flags         */
   camdef camera;             /**< camera definition                       */

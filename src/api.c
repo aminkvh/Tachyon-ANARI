@@ -61,8 +61,15 @@ apicolor rt_color(flt r, flt g, flt b) {
   return c;
 }
 
+/* InitTextures() resets the process-global image table, so it must run
+ * once per process, not on every rt_initialize(); rt_finalize() re-arms it */
+static int texinitted = 0;
+
 int rt_initialize(int * argc, char ***argv) {
-  InitTextures();
+  if (!texinitted) {
+    InitTextures();
+    texinitted = 1;
+  }
 
   if (!parinitted) {
     rt_par_init(argc, argv);
@@ -74,6 +81,7 @@ int rt_initialize(int * argc, char ***argv) {
 
 void rt_finalize(void) {
   FreeTextures();
+  texinitted = 0;
   rt_par_finish();
 }
 
@@ -681,7 +689,7 @@ void rt_deletescene(SceneHandle voidscene) {
     free(scene->cpuinfo);
     free_objects(scene->objgroup.boundedobj);
     free_objects(scene->objgroup.unboundedobj);
-    rt_bulkarena_freeall(); /* bulk-frees vcstri triangles/textures (see util.h) */
+    rt_bulkarena_freeall(&scene->objarena); /* bulk-frees vcstri objs/textures */
 
     free(scene);
   }
@@ -813,8 +821,9 @@ void * rt_texture_copy_standard(SceneHandle sc, void *oldtex) {
   return newtex;
 }
 void * rt_texture_copy_vcstri(SceneHandle sc, void *oldvoidtex) {
+  scenedef * scene = (scenedef *) sc;
   texture *oldtex = (texture *) oldvoidtex;
-  texture *newtex = new_vcstri_texture();
+  texture *newtex = new_vcstri_texture(&scene->objarena);
 
   /* copy in all of the texture components common to both tex types */
   newtex->flags = oldtex->flags;
@@ -1132,7 +1141,7 @@ void rt_vcstri(SceneHandle voidscene, void * tex,
                apivector n0, apivector n1, apivector n2, 
                apicolor c0, apicolor c1, apicolor c2) {
   scenedef * scene = (scenedef *) voidscene;
-  object * o = newvcstri(tex, v0, v1, v2, n0, n1, n2, c0, c1, c2);
+  object * o = newvcstri(&scene->objarena, tex, v0, v1, v2, n0, n1, n2, c0, c1, c2);
   /* don't add degenerate triangles */
   if (o != NULL) {
     if (scene->normalfixupmode)
@@ -1161,7 +1170,7 @@ void rt_vcstri3fv(SceneHandle voidscene, void * tex,
   cc1.r = c1[0]; cc1.g = c1[1]; cc1.b = c1[2]; 
   cc2.r = c2[0]; cc2.g = c2[1]; cc2.b = c2[2];
 
-  o = newvcstri(tex, vv0, vv1, vv2, vn0, vn1, vn2, cc0, cc1, cc2);
+  o = newvcstri(&scene->objarena, tex, vv0, vv1, vv2, vn0, vn1, vn2, cc0, cc1, cc2);
   /* don't add degenerate triangles */
   if (o != NULL) {
     if (scene->normalfixupmode)
@@ -1238,7 +1247,7 @@ void rt_tristripscnv3fv(SceneHandle voidscene, void * tex,
       v2.y = cnv[a2 + 8];
       v2.z = cnv[a2 + 9];
 
-      o = newvcstri(newtex, v0, v1, v2, n0, n1, n2, c0, c1, c2); 
+      o = newvcstri(&scene->objarena, newtex, v0, v1, v2, n0, n1, n2, c0, c1, c2); 
       if (scene->normalfixupmode)
         vcstri_normal_fixup(o, scene->normalfixupmode);
       add_bounded_object((scenedef *) scene, o);
