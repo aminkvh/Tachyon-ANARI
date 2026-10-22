@@ -219,13 +219,15 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           gh release create "$GITHUB_REF_NAME" dist/*.tar.gz --repo "$GITHUB_REPOSITORY" --title "$GITHUB_REF_NAME" --notes-file - <<'EOF'
-          Performance-focused fork of John Stone's Tachyon 0.99b6.
+          Fork of John Stone's Tachyon 0.99b6, now also available as a Khronos ANARI rendering device.
 
-          - Windows (MinGW) builds now use all cores by default instead of a single thread.
-          - Rendering: about 1.3–1.4x faster on AO and lattice test scenes at the same thread count; little change on sphere-heavy molecular scenes.
-          - Scene parsing: about 7–10x faster on large triangle meshes.
-          - Opt-in: `-accel bvh`, `-adaptive` (experimental and lossy), `-aosamples N`.
+          New in this release:
+          - Experimental ANARI device (`tachyon-anari-*` archives). It renders triangle meshes with perspective and orthographic cameras, matte and approximate physically based materials, directional and point lights, and color and depth output. It is a small CPU-only library that needs only the ANARI SDK 0.16 loader. Other geometry types are skipped with a warning.
+          - Windows: binary image textures (PPM/TGA) and volume data were read in text mode, which truncated them and left uninitialized memory. Scenes using them now render correctly and identically on every run.
+          - Texture lookups no longer read outside the image.
+          - CMake build (`-DTACHYON_BUILD_ANARI=ON` for the device).
 
-          Output is byte-identical to stock on the test scenes, except ambient-occlusion scenes, whose noise pattern differs because of the new sampler.
-          Binaries are command-line only, with no JPEG/PNG output (PPM/TGA/BMP/PSD/RGB are supported). The macOS build is ARM64.
+          From the previous release: Windows (MinGW) builds use all cores by default; rendering is about 1.3–1.4x faster on AO and lattice test scenes; scene parsing is about 7–10x faster on large triangle meshes.
+
+          Command-line binaries have no JPEG/PNG output (PPM/TGA/BMP/PSD/RGB are supported). The macOS builds are ARM64.
           EOF
