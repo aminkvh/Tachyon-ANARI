@@ -45,6 +45,8 @@ void TachyonScene::destroy()
   m_styles.clear();
   m_headlight = nullptr;
   m_numTriangles = 0;
+  m_numSpheres = 0;
+  m_numCylinders = 0;
   m_width = m_height = 0;
   m_lastAspect = -1.f;
   m_lastProjection = -1;
@@ -152,6 +154,73 @@ void TachyonScene::addTriangle(
   } else {
     rt_tri3fv(m_scene, base, p, p + 3, p + 6);
   }
+}
+
+void *TachyonScene::colorTexture(Style &st, const float *rgb)
+{
+  if (!rgb)
+    return st.textures[0];
+  ColorKey key;
+  std::memcpy(key.bits, rgb, sizeof(key.bits));
+  if (st.lastTex && key == st.lastKey)
+    return st.lastTex;
+  void *&tex = st.colorTextures[key];
+  if (!tex) {
+    tex = rt_texture_copy_color(m_scene, st.textures[0], rgb);
+    st.textures.push_back(tex);
+  }
+  st.lastKey = key;
+  st.lastTex = tex;
+  return tex;
+}
+
+void TachyonScene::addSphere(
+    int style, const float *center, float radius, const float *rgb)
+{
+  void *tex = colorTexture(m_styles[style], rgb);
+  rt_sphere3fv_bulk(m_scene, tex, center, radius);
+  m_numSpheres++;
+}
+
+void TachyonScene::addCylinder(int style,
+    const float *p0,
+    const float *p1,
+    float radius,
+    const float *rgb0,
+    const float *rgb1,
+    int caps)
+{
+  Style &st = m_styles[style];
+  const float axis[3] = {p1[0] - p0[0], p1[1] - p0[1], p1[2] - p0[2]};
+  if (!(axis[0] * axis[0] + axis[1] * axis[1] + axis[2] * axis[2] > 0.f))
+    return; // degenerate
+
+  const bool split = rgb0 && rgb1
+      && (rgb0[0] != rgb1[0] || rgb0[1] != rgb1[1] || rgb0[2] != rgb1[2]);
+  if (!split) {
+    void *tex = colorTexture(st, rgb0 ? rgb0 : rgb1);
+    rt_fcylinder3fv_bulk(m_scene, tex, p0, axis, radius);
+    if (caps & 1)
+      rt_ring3fv_bulk(m_scene, tex, p0, axis, 0.f, radius);
+    if (caps & 2)
+      rt_ring3fv_bulk(m_scene, tex, p1, axis, 0.f, radius);
+    m_numCylinders++;
+    return;
+  }
+
+  const float mid[3] = {p0[0] + 0.5f * axis[0],
+      p0[1] + 0.5f * axis[1],
+      p0[2] + 0.5f * axis[2]};
+  const float half[3] = {0.5f * axis[0], 0.5f * axis[1], 0.5f * axis[2]};
+  void *tex0 = colorTexture(st, rgb0);
+  rt_fcylinder3fv_bulk(m_scene, tex0, p0, half, radius);
+  if (caps & 1)
+    rt_ring3fv_bulk(m_scene, tex0, p0, axis, 0.f, radius);
+  void *tex1 = colorTexture(st, rgb1);
+  rt_fcylinder3fv_bulk(m_scene, tex1, mid, half, radius);
+  if (caps & 2)
+    rt_ring3fv_bulk(m_scene, tex1, p1, axis, 0.f, radius);
+  m_numCylinders++;
 }
 
 void TachyonScene::addDirectionalLight(const float *direction, const float *rgb)

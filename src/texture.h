@@ -31,5 +31,6 @@ void FreeTextures(void);
 texture * new_texture(void);
 texture * new_standard_texture(void);
 texture * new_vcstri_texture(rt_bulkarena *);
+texture * new_standard_texture_bulk(rt_bulkarena *, const void * src);
 void free_standard_texture(void * voidtex);
 

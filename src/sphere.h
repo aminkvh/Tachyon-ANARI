@@ -5,6 +5,7 @@
  */
 
 object * newsphere(void *, vector, flt);
+object * newsphere_bulk(rt_bulkarena *, void *, vector, flt);
 
 #ifdef SPHERE_PRIVATE
 

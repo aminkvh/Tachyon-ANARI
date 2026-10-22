@@ -6,6 +6,7 @@
 
 object * newcylinder(void *, vector, vector, flt);
 object * newfcylinder(void *, vector, vector, flt);
+object * newfcylinder_bulk(rt_bulkarena *, void *, vector, vector, flt);
 
 #ifdef CYLINDER_PRIVATE
 

@@ -57,6 +57,17 @@ texture * new_standard_texture(void) {
   return (texture *) tex;
 }
 
+/* Arena copy of a standard texture, for per-color texture variants that live
+ * for the lifetime of the scene; not registered in scene->texlist, so the
+ * no-op free is never called but keeps the object safe if it ever is. */
+texture * new_standard_texture_bulk(rt_bulkarena * arena, const void * src) {
+  standard_texture * tex;
+  tex = (standard_texture *) rt_bulkarena_alloc(arena, sizeof(standard_texture));
+  memcpy(tex, src, sizeof(standard_texture));
+  tex->methods = &vcstri_arena_methods;
+  return (texture *) tex;
+}
+
 texture * new_vcstri_texture(rt_bulkarena * arena) {
   vcstri_texture * tex;
   tex = (vcstri_texture *) rt_bulkarena_alloc(arena, sizeof(vcstri_texture));

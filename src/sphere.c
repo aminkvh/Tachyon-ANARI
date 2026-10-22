@@ -26,6 +26,33 @@ static object_methods sphere_methods = {
   free 
 };
 
+/* Arena-allocated spheres (scene lifetime, bulk-freed by rt_deletescene())
+ * must never have libc free() called on an individual object. */
+static void sphere_arena_noop_free(void * p) {
+  (void) p;
+}
+
+static object_methods sphere_arena_methods = {
+  (void (*)(const void *, void *))(sphere_intersect),
+  (void (*)(const void *, const void *, const void *, void *))(sphere_normal),
+  sphere_bbox,
+  sphere_arena_noop_free
+};
+
+object * newsphere_bulk(rt_bulkarena * arena, void * tex, vector ctr, flt rad) {
+  sphere * s;
+
+  s=(sphere *) rt_bulkarena_alloc(arena, sizeof(sphere));
+  memset(s, 0, sizeof(sphere));
+  s->methods = &sphere_arena_methods;
+
+  s->tex=tex;
+  s->ctr=ctr;
+  s->rad=rad;
+
+  return (object *) s;
+}
+
 object * newsphere(void * tex, vector ctr, flt rad) {
   sphere * s;
   

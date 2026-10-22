@@ -848,6 +848,19 @@ void * rt_texture_copy_vcstri(SceneHandle sc, void *oldvoidtex) {
 }
 
 
+/* arena-allocated copy of a standard (constant-color) texture with a new
+ * base color: no per-texture malloc, bulk-freed with the scene */
+void * rt_texture_copy_color(SceneHandle sc, void *oldvoidtex, const float *rgb) {
+  scenedef * scene = (scenedef *) sc;
+  standard_texture * newtex = (standard_texture *)
+      new_standard_texture_bulk(&scene->objarena, oldvoidtex);
+  newtex->col.r = rgb[0];
+  newtex->col.g = rgb[1];
+  newtex->col.b = rgb[2];
+  return newtex;
+}
+
+
 void rt_tex_phong(void * voidtex, flt phong, flt phongexp, int type) {
   texture * tex = (texture *) voidtex;
   tex->phong = phong;
@@ -1048,6 +1061,16 @@ void rt_cylinder3fv(SceneHandle scene, void * tex,
 }
 
 
+void rt_fcylinder3fv_bulk(SceneHandle voidscene, void * tex,
+                          const float *ctr, const float *axis, float rad) {
+  scenedef * scene = (scenedef *) voidscene;
+  vector vctr, vaxis;
+  vctr.x = ctr[0];   vctr.y = ctr[1];   vctr.z = ctr[2];
+  vaxis.x = axis[0]; vaxis.y = axis[1]; vaxis.z = axis[2];
+  add_bounded_object(scene, newfcylinder_bulk(&scene->objarena, tex, vctr, vaxis, rad));
+}
+
+
 void rt_fcylinder(SceneHandle scene, void * tex, apivector ctr, apivector axis, flt rad) {
   add_bounded_object((scenedef *) scene, newfcylinder(tex, ctr, axis, rad));
 }
@@ -1085,6 +1108,25 @@ void rt_ring3fv(SceneHandle scene, void * tex,
   vnorm.x = norm[0]; vnorm.y = norm[1]; vnorm.z = norm[2];
   add_bounded_object((scenedef *) scene, newring(tex, vctr, vnorm, inner, outer));
 } 
+
+
+void rt_ring3fv_bulk(SceneHandle voidscene, void * tex,
+                     const float *ctr, const float *norm, float inner, float outer) {
+  scenedef * scene = (scenedef *) voidscene;
+  vector vctr, vnorm;
+  vctr.x = ctr[0];   vctr.y = ctr[1];   vctr.z = ctr[2];
+  vnorm.x = norm[0]; vnorm.y = norm[1]; vnorm.z = norm[2];
+  add_bounded_object(scene, newring_bulk(&scene->objarena, tex, vctr, vnorm, inner, outer));
+}
+
+
+void rt_sphere3fv_bulk(SceneHandle voidscene, void * tex,
+                       const float *ctr, float rad) {
+  scenedef * scene = (scenedef *) voidscene;
+  vector vctr;
+  vctr.x = ctr[0]; vctr.y = ctr[1]; vctr.z = ctr[2];
+  add_bounded_object(scene, newsphere_bulk(&scene->objarena, tex, vctr, rad));
+}
 
 
 void rt_sphere(SceneHandle scene, void * tex, apivector ctr, flt rad) {

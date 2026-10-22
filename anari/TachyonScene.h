@@ -8,6 +8,8 @@
 // global namespace), so the rest of the device never touches it.
 
 #include <cstddef>
+#include <cstdint>
+#include <unordered_map>
 #include <vector>
 
 namespace tachyon_anari {
@@ -49,6 +51,21 @@ class TachyonScene
   int addStyle(const SurfaceStyle &style);
   // p: 3 x xyz, n: 3 x xyz or nullptr, c: 3 x rgb or nullptr
   void addTriangle(int style, const float *p, const float *n, const float *c);
+  // Spheres and cylinders are allocated from the scene's bulk arena (no
+  // per-object malloc). 'rgb' (3 floats, may be nullptr) overrides the style
+  // color; textures are shared between all objects of a style that use the
+  // same color, so only the number of distinct colors costs memory.
+  void addSphere(int style, const float *center, float radius, const float *rgb);
+  // Finite cylinder from p0 to p1. 'caps': bit 0 closes the p0 end, bit 1 the
+  // p1 end. With two different colors the cylinder is split at its midpoint
+  // (Tachyon has no color gradients), one half per color.
+  void addCylinder(int style,
+      const float *p0,
+      const float *p1,
+      float radius,
+      const float *rgb0,
+      const float *rgb1,
+      int caps);
   // 'direction': the direction the light travels (same as ANARI)
   void addDirectionalLight(const float *direction, const float *rgb);
   void addPointLight(const float *position, const float *rgb);
@@ -71,15 +88,40 @@ class TachyonScene
   void render();
 
   size_t numTriangles() const { return m_numTriangles; }
+  size_t numSpheres() const { return m_numSpheres; }
+  size_t numCylinders() const { return m_numCylinders; }
 
  private:
   void destroy();
 
+  struct ColorKey
+  {
+    uint32_t bits[3];
+    bool operator==(const ColorKey &o) const
+    {
+      return bits[0] == o.bits[0] && bits[1] == o.bits[1] && bits[2] == o.bits[2];
+    }
+  };
+  struct ColorKeyHash
+  {
+    size_t operator()(const ColorKey &k) const
+    {
+      uint64_t h = k.bits[0] * 0x9E3779B97F4A7C15ull;
+      h = (h ^ (h >> 29)) + k.bits[1] * 0xBF58476D1CE4E5B9ull;
+      h = (h ^ (h >> 29)) + k.bits[2] * 0x94D049BB133111EBull;
+      return size_t(h ^ (h >> 32));
+    }
+  };
   struct Style
   {
-    std::vector<void *> textures;
+    std::vector<void *> textures; // [0]: base; the rest need shading updates
     float diffuse{1.f};
+    std::unordered_map<ColorKey, void *, ColorKeyHash> colorTextures;
+    ColorKey lastKey{{0, 0, 0}};
+    void *lastTex{nullptr}; // one-entry cache: runs of equal colors are common
   };
+
+  void *colorTexture(Style &st, const float *rgb);
 
   void *m_scene{nullptr};
   std::vector<Style> m_styles;
@@ -87,6 +129,8 @@ class TachyonScene
   bool m_lit{false};
   bool m_transparent{false};
   size_t m_numTriangles{0};
+  size_t m_numSpheres{0};
+  size_t m_numCylinders{0};
   int m_width{0}, m_height{0};
   float *m_buffer{nullptr};
   float m_lastAspect{-1.f};

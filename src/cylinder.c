@@ -153,6 +153,34 @@ static void cylinder_normal(const cylinder * cyl, const vector * pnt, const ray 
   }
 }
 
+/* Arena-allocated finite cylinders: bulk-freed by rt_deletescene(). */
+static void fcylinder_arena_noop_free(void * p) {
+  (void) p;
+}
+
+static object_methods fcylinder_arena_methods = {
+  (void (*)(const void *, void *))(fcylinder_intersect),
+  (void (*)(const void *, const void *, const void *, void *))(cylinder_normal),
+  fcylinder_bbox,
+  fcylinder_arena_noop_free
+};
+
+object * newfcylinder_bulk(rt_bulkarena * arena, void * tex, vector ctr, vector axis, flt rad) {
+  cylinder * c;
+
+  c=(cylinder *) rt_bulkarena_alloc(arena, sizeof(cylinder));
+  memset(c, 0, sizeof(cylinder));
+  c->methods = &fcylinder_arena_methods;
+
+  c->tex=(texture *) tex;
+  c->ctr=ctr;
+  c->axis=axis;
+  c->rad=rad;
+  cylinder_precompute(c);
+
+  return (object *) c;
+}
+
 object * newfcylinder(void * tex, vector ctr, vector axis, flt rad) {
   cylinder * c;
   

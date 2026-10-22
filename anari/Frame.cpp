@@ -167,8 +167,11 @@ void Frame::rebuildScene(helium::TimeStamp sceneStamp)
   m_shadingDirty = true;
   state->sceneBuilds++;
   reportMessage(ANARI_SEVERITY_DEBUG,
-      "tachyon: rebuilt scene (%zu triangles, %zu lights)",
+      "tachyon: rebuilt scene (%zu triangles, %zu spheres, %zu cylinders, "
+      "%zu lights)",
       m_scene.numTriangles(),
+      m_scene.numSpheres(),
+      m_scene.numCylinders(),
       lights.size());
 }
 

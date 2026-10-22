@@ -5,6 +5,7 @@
  */
 
 object * newring(void * tex, vector ctr, vector norm, flt in, flt out);
+object * newring_bulk(rt_bulkarena *, void * tex, vector ctr, vector norm, flt in, flt out);
 
 #ifdef RING_PRIVATE 
 typedef struct {

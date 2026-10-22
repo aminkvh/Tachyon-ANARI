@@ -26,6 +26,36 @@ static object_methods ring_methods = {
   free 
 };
 
+/* Arena-allocated rings: bulk-freed by rt_deletescene(). */
+static void ring_arena_noop_free(void * p) {
+  (void) p;
+}
+
+static object_methods ring_arena_methods = {
+  (void (*)(const void *, void *))(ring_intersect),
+  (void (*)(const void *, const void *, const void *, void *))(ring_normal),
+  ring_bbox,
+  ring_arena_noop_free
+};
+
+object * newring_bulk(rt_bulkarena * arena, void * tex, vector ctr, vector norm, flt inrad, flt outrad) {
+  ring * r;
+
+  r=(ring *) rt_bulkarena_alloc(arena, sizeof(ring));
+  memset(r, 0, sizeof(ring));
+  r->methods = &ring_arena_methods;
+
+  r->tex = tex;
+  r->ctr = ctr;
+  r->norm = norm;
+  VNorm(&r->norm);
+  r->inrad = inrad;
+  r->outrad= outrad;
+  r->d = -VDot(&ctr, &r->norm);
+
+  return (object *) r;
+}
+
 object * newring(void * tex, vector ctr, vector norm, flt inrad, flt outrad) {
   ring * r;
   

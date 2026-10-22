@@ -79,6 +79,72 @@ struct Triangle : public Geometry
   size_t m_numTriangles{0};
 };
 
+// Common part of the point/segment based geometries: vertex positions plus
+// vertex and primitive attributes.
+struct AttributedGeometry : public Geometry
+{
+  AttributedGeometry(TachyonGlobalState *s);
+
+  void commitParameters() override;
+  bool isValid() const override { return m_valid; }
+  ColorSource attributeSource(int attr) const override;
+
+ protected:
+  // Validates the position array (reporting problems for geometry 'what').
+  bool validatePositions(const char *what);
+  // Validates the attribute arrays for 'numPrims' primitives (dropping the
+  // ones that are too small).
+  void validateAttributes(size_t numPrims);
+  // Component 'c' of (UINT32 or UINT64 based) index element 'i'
+  static size_t indexAt(const Array1D &index, size_t i, int comps, int c);
+
+  helium::ChangeObserverPtr<Array1D> m_position;
+  std::array<helium::ChangeObserverPtr<Array1D>, kNumAttributes> m_vertexAttr;
+  std::array<helium::ChangeObserverPtr<Array1D>, kNumAttributes> m_primAttr;
+  bool m_valid{false};
+  size_t m_numPrims{0};
+};
+
+struct Sphere : public AttributedGeometry
+{
+  Sphere(TachyonGlobalState *s);
+
+  void commitParameters() override;
+  void finalize() override;
+
+  void emit(TachyonScene &scene,
+      int style,
+      const mat4 &xfm,
+      int colorAttr) const override;
+  bool bounds(const mat4 &xfm, float3 &lo, float3 &hi) const override;
+
+ private:
+  helium::ChangeObserverPtr<Array1D> m_index;
+  helium::ChangeObserverPtr<Array1D> m_radius; // vertex.radius
+  float m_globalRadius{1.f};
+};
+
+struct Cylinder : public AttributedGeometry
+{
+  Cylinder(TachyonGlobalState *s);
+
+  void commitParameters() override;
+  void finalize() override;
+
+  void emit(TachyonScene &scene,
+      int style,
+      const mat4 &xfm,
+      int colorAttr) const override;
+  bool bounds(const mat4 &xfm, float3 &lo, float3 &hi) const override;
+
+ private:
+  helium::ChangeObserverPtr<Array1D> m_index;
+  helium::ChangeObserverPtr<Array1D> m_radius; // primitive.radius
+  helium::ChangeObserverPtr<Array1D> m_vertexCap; // vertex.cap
+  float m_globalRadius{1.f};
+  int m_globalCaps{0}; // bit 0: first vertex, bit 1: second vertex
+};
+
 using UnsupportedGeometry = Unsupported<Geometry>;
 
 } // namespace tachyon_anari

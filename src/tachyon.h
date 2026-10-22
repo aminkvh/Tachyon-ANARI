@@ -530,6 +530,9 @@ void * rt_texture_copy_standard(SceneHandle, void *oldtex);
  * short-term workaround until new object types have been created.
  */
 void * rt_texture_copy_vcstri(SceneHandle, void *oldtex);
+/** Arena-allocated copy of a standard texture with base color rgb[3]; not
+ *  individually freed (bulk-freed with the scene). */
+void * rt_texture_copy_color(SceneHandle, void *oldtex, const float *rgb);
 
 
 /*****************************/
@@ -681,6 +684,13 @@ void rt_polycylinder3fv(SceneHandle, void *tex, const float *points,
 void rt_sphere(SceneHandle, void *tex, apivector center, flt radius);
 /** Define a sphere with associated texture, center, and radius.  */
 void rt_sphere3fv(SceneHandle, void *tex, const float *center, float radius);
+/** The _bulk variants allocate the object from the scene's bulk arena
+ *  instead of malloc (for scenes with very many small objects). */
+void rt_sphere3fv_bulk(SceneHandle, void *tex, const float *center, float radius);
+void rt_fcylinder3fv_bulk(SceneHandle, void *tex, const float *center,
+                          const float *axis, float radius);
+void rt_ring3fv_bulk(SceneHandle, void *tex, const float *center,
+                     const float *normal, float inner, float outer);
 
 
 /** Define a plane.  */

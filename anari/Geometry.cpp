@@ -16,6 +16,10 @@ Geometry *Geometry::createInstance(
 {
   if (subtype == "triangle")
     return new Triangle(s);
+  if (subtype == "sphere")
+    return new Sphere(s);
+  if (subtype == "cylinder")
+    return new Cylinder(s);
   return nullptr; // caller creates an UnsupportedGeometry
 }
 
@@ -221,6 +225,336 @@ bool Triangle::bounds(const mat4 &xfm, float3 &lo, float3 &hi) const
     hi = (i == 0) ? v : linalg::max(hi, v);
   }
   return true;
+}
+
+// AttributedGeometry /////////////////////////////////////////////////////////
+
+AttributedGeometry::AttributedGeometry(TachyonGlobalState *s)
+    : Geometry(s),
+      m_position(this),
+      m_vertexAttr{{{this}, {this}, {this}, {this}, {this}}},
+      m_primAttr{{{this}, {this}, {this}, {this}, {this}}}
+{}
+
+void AttributedGeometry::commitParameters()
+{
+  Geometry::commitParameters();
+  m_position = getParamObject<Array1D>("vertex.position");
+  for (int i = 0; i < kNumAttributes; i++) {
+    m_vertexAttr[i] = getParamObject<Array1D>(
+        (std::string("vertex.") + kAttrNames[i]).c_str());
+    m_primAttr[i] = getParamObject<Array1D>(
+        (std::string("primitive.") + kAttrNames[i]).c_str());
+  }
+}
+
+bool AttributedGeometry::validatePositions(const char *what)
+{
+  m_valid = false;
+  m_numPrims = 0;
+  if (!m_position) {
+    reportMessage(ANARI_SEVERITY_WARNING,
+        "missing required parameter 'vertex.position' on %s geometry",
+        what);
+    return false;
+  }
+  if (m_position->elementType() != ANARI_FLOAT32_VEC3) {
+    reportMessage(ANARI_SEVERITY_WARNING,
+        "'vertex.position' must be FLOAT32_VEC3 (got %s)",
+        anari::toString(m_position->elementType()));
+    return false;
+  }
+  return true;
+}
+
+void AttributedGeometry::validateAttributes(size_t numPrims)
+{
+  m_numPrims = numPrims;
+  for (int i = 0; i < kNumAttributes; i++) {
+    if (m_vertexAttr[i] && m_vertexAttr[i]->size() < m_position->size()) {
+      reportMessage(ANARI_SEVERITY_WARNING,
+          "'vertex.%s' has fewer elements than 'vertex.position', ignoring it",
+          kAttrNames[i]);
+      m_vertexAttr[i] = nullptr;
+    }
+    if (m_primAttr[i] && m_primAttr[i]->size() < m_numPrims)
+      m_primAttr[i] = nullptr;
+  }
+}
+
+ColorSource AttributedGeometry::attributeSource(int attr) const
+{
+  if (m_vertexAttr[attr])
+    return ColorSource::VERTEX;
+  if (m_primAttr[attr])
+    return ColorSource::PRIMITIVE;
+  return Geometry::attributeSource(attr);
+}
+
+size_t AttributedGeometry::indexAt(
+    const Array1D &index, size_t i, int comps, int c)
+{
+  const ANARIDataType t = index.elementType();
+  if (t == ANARI_UINT64 || t == ANARI_UINT64_VEC2)
+    return size_t(static_cast<const uint64_t *>(index.begin())[comps * i + c]);
+  return size_t(static_cast<const uint32_t *>(index.begin())[comps * i + c]);
+}
+
+// Scale applied to radii by a transform (exact for uniform scale)
+static float radiusScale(const mat4 &m)
+{
+  const float3x3 m3(float3(m[0].x, m[0].y, m[0].z),
+      float3(m[1].x, m[1].y, m[1].z),
+      float3(m[2].x, m[2].y, m[2].z));
+  const float d = std::abs(linalg::determinant(m3));
+  return d > 0.f ? std::cbrt(d) : 0.f;
+}
+
+// Sphere /////////////////////////////////////////////////////////////////////
+
+Sphere::Sphere(TachyonGlobalState *s)
+    : AttributedGeometry(s), m_index(this), m_radius(this)
+{}
+
+void Sphere::commitParameters()
+{
+  AttributedGeometry::commitParameters();
+  m_index = getParamObject<Array1D>("primitive.index");
+  m_radius = getParamObject<Array1D>("vertex.radius");
+  m_globalRadius = getParam<float>("radius", 1.f);
+}
+
+void Sphere::finalize()
+{
+  if (!validatePositions("sphere"))
+    return;
+  if (m_index && m_index->elementType() != ANARI_UINT32
+      && m_index->elementType() != ANARI_UINT64) {
+    reportMessage(ANARI_SEVERITY_WARNING,
+        "'primitive.index' must be UINT32 or UINT64 (got %s), ignoring it",
+        anari::toString(m_index->elementType()));
+    m_index = nullptr;
+  }
+  if (m_radius && m_radius->elementType() != ANARI_FLOAT32) {
+    reportMessage(ANARI_SEVERITY_WARNING,
+        "'vertex.radius' must be FLOAT32 (got %s), ignoring it",
+        anari::toString(m_radius->elementType()));
+    m_radius = nullptr;
+  }
+  if (m_radius && m_radius->size() < m_position->size()) {
+    reportMessage(ANARI_SEVERITY_WARNING,
+        "'vertex.radius' has fewer elements than 'vertex.position', "
+        "ignoring it");
+    m_radius = nullptr;
+  }
+  validateAttributes(m_index ? m_index->size() : m_position->size());
+  m_valid = true;
+}
+
+void Sphere::emit(
+    TachyonScene &scene, int style, const mat4 &xfm, int colorAttr) const
+{
+  if (!m_valid)
+    return;
+
+  const float *pos = static_cast<const float *>(m_position->begin());
+  const size_t numVerts = m_position->size();
+  const float *vrad =
+      m_radius ? static_cast<const float *>(m_radius->begin()) : nullptr;
+  const float rs = radiusScale(xfm);
+
+  const Array1D *vattr =
+      colorAttr >= 0 ? m_vertexAttr[colorAttr].get() : nullptr;
+  const Array1D *pattr =
+      (colorAttr >= 0 && !vattr) ? m_primAttr[colorAttr].get() : nullptr;
+
+  for (size_t p = 0; p < m_numPrims; p++) {
+    const size_t vi = m_index ? indexAt(*m_index, p, 1, 0) : p;
+    if (vi >= numVerts)
+      continue;
+    const float r = (vrad ? vrad[vi] : m_globalRadius) * rs;
+    if (!(r > 0.f))
+      continue;
+
+    float c[3], col[3];
+    xfmPoint(xfm, pos + 3 * vi, c);
+    if (vattr)
+      readColor(*vattr, vi, col);
+    else if (pattr)
+      readColor(*pattr, p, col);
+    scene.addSphere(style, c, r, (vattr || pattr) ? col : nullptr);
+  }
+}
+
+bool Sphere::bounds(const mat4 &xfm, float3 &lo, float3 &hi) const
+{
+  if (!m_valid)
+    return false;
+  const float *pos = static_cast<const float *>(m_position->begin());
+  const size_t numVerts = m_position->size();
+  const float *vrad =
+      m_radius ? static_cast<const float *>(m_radius->begin()) : nullptr;
+  const float rs = radiusScale(xfm);
+  bool any = false;
+  for (size_t p = 0; p < m_numPrims; p++) {
+    const size_t vi = m_index ? indexAt(*m_index, p, 1, 0) : p;
+    if (vi >= numVerts)
+      continue;
+    const float r = (vrad ? vrad[vi] : m_globalRadius) * rs;
+    if (!(r > 0.f))
+      continue;
+    float c[3];
+    xfmPoint(xfm, pos + 3 * vi, c);
+    const float3 v(c[0], c[1], c[2]);
+    lo = any ? linalg::min(lo, v - r) : v - r;
+    hi = any ? linalg::max(hi, v + r) : v + r;
+    any = true;
+  }
+  return any;
+}
+
+// Cylinder ///////////////////////////////////////////////////////////////////
+
+Cylinder::Cylinder(TachyonGlobalState *s)
+    : AttributedGeometry(s), m_index(this), m_radius(this), m_vertexCap(this)
+{}
+
+void Cylinder::commitParameters()
+{
+  AttributedGeometry::commitParameters();
+  m_index = getParamObject<Array1D>("primitive.index");
+  m_radius = getParamObject<Array1D>("primitive.radius");
+  m_vertexCap = getParamObject<Array1D>("vertex.cap");
+  m_globalRadius = getParam<float>("radius", 1.f);
+
+  const std::string caps = getParamString("caps", "none");
+  m_globalCaps = 0;
+  if (caps == "first")
+    m_globalCaps = 1;
+  else if (caps == "second")
+    m_globalCaps = 2;
+  else if (caps == "both")
+    m_globalCaps = 3;
+  else if (caps != "none") {
+    reportMessage(ANARI_SEVERITY_WARNING,
+        "unknown cylinder 'caps' value '%s', using 'none'",
+        caps.c_str());
+  }
+}
+
+void Cylinder::finalize()
+{
+  if (!validatePositions("cylinder"))
+    return;
+  if (m_index && m_index->elementType() != ANARI_UINT32_VEC2
+      && m_index->elementType() != ANARI_UINT64_VEC2) {
+    reportMessage(ANARI_SEVERITY_WARNING,
+        "'primitive.index' must be UINT32_VEC2 or UINT64_VEC2 (got %s), "
+        "ignoring it",
+        anari::toString(m_index->elementType()));
+    m_index = nullptr;
+  }
+  if (m_radius && m_radius->elementType() != ANARI_FLOAT32) {
+    reportMessage(ANARI_SEVERITY_WARNING,
+        "'primitive.radius' must be FLOAT32 (got %s), ignoring it",
+        anari::toString(m_radius->elementType()));
+    m_radius = nullptr;
+  }
+  if (m_vertexCap
+      && (m_vertexCap->elementType() != ANARI_UINT8
+          || m_vertexCap->size() < m_position->size())) {
+    reportMessage(ANARI_SEVERITY_WARNING,
+        "'vertex.cap' must be UINT8 with one element per vertex, ignoring it");
+    m_vertexCap = nullptr;
+  }
+  validateAttributes(m_index ? m_index->size() : m_position->size() / 2);
+  if (m_radius && m_radius->size() < m_numPrims)
+    m_radius = nullptr;
+  m_valid = true;
+}
+
+void Cylinder::emit(
+    TachyonScene &scene, int style, const mat4 &xfm, int colorAttr) const
+{
+  if (!m_valid)
+    return;
+
+  const float *pos = static_cast<const float *>(m_position->begin());
+  const size_t numVerts = m_position->size();
+  const float *prad =
+      m_radius ? static_cast<const float *>(m_radius->begin()) : nullptr;
+  const uint8_t *vcap = m_vertexCap
+      ? static_cast<const uint8_t *>(m_vertexCap->begin())
+      : nullptr;
+  const float rs = radiusScale(xfm);
+
+  const Array1D *vattr =
+      colorAttr >= 0 ? m_vertexAttr[colorAttr].get() : nullptr;
+  const Array1D *pattr =
+      (colorAttr >= 0 && !vattr) ? m_primAttr[colorAttr].get() : nullptr;
+
+  for (size_t p = 0; p < m_numPrims; p++) {
+    const size_t v0 = m_index ? indexAt(*m_index, p, 2, 0) : 2 * p;
+    const size_t v1 = m_index ? indexAt(*m_index, p, 2, 1) : 2 * p + 1;
+    if (v0 >= numVerts || v1 >= numVerts)
+      continue;
+    const float r = (prad ? prad[p] : m_globalRadius) * rs;
+    if (!(r > 0.f))
+      continue;
+
+    float a[3], b[3], c0[3], c1[3];
+    xfmPoint(xfm, pos + 3 * v0, a);
+    xfmPoint(xfm, pos + 3 * v1, b);
+    const float *col0 = nullptr, *col1 = nullptr;
+    if (vattr) {
+      readColor(*vattr, v0, c0);
+      readColor(*vattr, v1, c1);
+      col0 = c0;
+      col1 = c1;
+    } else if (pattr) {
+      readColor(*pattr, p, c0);
+      col0 = c0;
+    }
+
+    int caps = m_globalCaps;
+    if (vcap) {
+      caps |= vcap[v0] ? 1 : 0;
+      caps |= vcap[v1] ? 2 : 0;
+    }
+    scene.addCylinder(style, a, b, r, col0, col1, caps);
+  }
+}
+
+bool Cylinder::bounds(const mat4 &xfm, float3 &lo, float3 &hi) const
+{
+  if (!m_valid)
+    return false;
+  const float *pos = static_cast<const float *>(m_position->begin());
+  const size_t numVerts = m_position->size();
+  const float *prad =
+      m_radius ? static_cast<const float *>(m_radius->begin()) : nullptr;
+  const float rs = radiusScale(xfm);
+  bool any = false;
+  for (size_t p = 0; p < m_numPrims; p++) {
+    const size_t v0 = m_index ? indexAt(*m_index, p, 2, 0) : 2 * p;
+    const size_t v1 = m_index ? indexAt(*m_index, p, 2, 1) : 2 * p + 1;
+    if (v0 >= numVerts || v1 >= numVerts)
+      continue;
+    const float r = (prad ? prad[p] : m_globalRadius) * rs;
+    if (!(r > 0.f))
+      continue;
+    float a[3], b[3];
+    xfmPoint(xfm, pos + 3 * v0, a);
+    xfmPoint(xfm, pos + 3 * v1, b);
+    const float3 va(a[0], a[1], a[2]), vb(b[0], b[1], b[2]);
+    // conservative: the end disks extend at most r along every axis
+    const float3 mn = linalg::min(va, vb) - r;
+    const float3 mx = linalg::max(va, vb) + r;
+    lo = any ? linalg::min(lo, mn) : mn;
+    hi = any ? linalg::max(hi, mx) : mx;
+    any = true;
+  }
+  return any;
 }
 
 } // namespace tachyon_anari
