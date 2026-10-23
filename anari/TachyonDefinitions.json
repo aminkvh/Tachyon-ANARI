@@ -33,8 +33,8 @@
           "types": ["ANARI_STRING"],
           "tags": [],
           "default": "auto",
-          "values": ["auto", "cpu", "vulkan"],
-          "description": "which renderer executes the frames: 'cpu' (Tachyon core), 'vulkan' (hardware ray tracing through Vulkan ray queries; experimental, spheres only) or 'auto' (Vulkan if a capable GPU exists, otherwise cpu). The TACHYON_BACKEND environment variable sets the default."
+          "values": ["auto", "cpu", "vulkan", "metal"],
+          "description": "which renderer executes the frames: 'cpu' (Tachyon core), 'vulkan' (hardware ray tracing through Vulkan ray queries, Windows and Linux), 'metal' (Metal ray tracing, macOS; experimental) or 'auto' (a GPU backend if a capable GPU exists, otherwise cpu). The TACHYON_BACKEND environment variable sets the default."
         }
       ]
     },

@@ -2,8 +2,16 @@
 # SPDX-License-Identifier: Apache-2.0
 #
 # cmake -DINPUT=raytrace.spv -DOUTPUT=raytrace.spv.h -DNAME=kRaytraceSpv -P embed_spirv.cmake
-# Writes a SPIR-V binary as a C array.
+# Writes a shader binary (SPIR-V) or source (Metal, with -DTEXT=ON: line
+# endings normalized to LF so the result does not depend on the host) as a C
+# array.
 file(READ "${INPUT}" hex HEX)
+if(TEXT)
+  # drop every CR byte
+  string(REGEX REPLACE "([0-9a-f][0-9a-f])" "\\1;" bytelist "${hex}")
+  list(REMOVE_ITEM bytelist "0d")
+  string(REPLACE ";" "" hex "${bytelist}")
+endif()
 string(LENGTH "${hex}" hexlen)
 math(EXPR nbytes "${hexlen} / 2")
 # 16 bytes (32 hex digits) per line

@@ -1,20 +1,24 @@
 // Copyright (c) 2026 Tachyon-dev contributors
 // SPDX-License-Identifier: Apache-2.0
 
-// Shaders of the Vulkan backend. Compiled to SPIR-V by slangc (see
-// anari/gpu/CMakeLists.txt and TACHYON_REGENERATE_SHADERS); the result is
-// committed as raytrace.spv.h.
+// Shaders of the GPU backends. Compiled by slangc (see anari/CMakeLists.txt
+// and TACHYON_REGENERATE_SHADERS); the results are committed as raytrace.spv.h
+// (Vulkan) and raytrace.metal.h (Metal source, compiled when the device
+// starts):
 //
 //   slangc raytrace.slang -target spirv -profile spirv_1_4 \
 //     -capability spvRayQueryKHR -entry genAabbs -stage compute \
 //     -entry main -stage compute -o raytrace.spv
+//   slangc raytrace.slang -target metal -DTACHYON_METAL \
+//     -line-directive-mode none -entry main -stage compute -o raytrace.metal
 //
 // The shading is a port of Tachyon's full shader (src/shade.c) as the CPU
 // backend drives it: constant ambient + sum of Lambertian lights (with
 // shadow rays) times the surface color, Blinn highlights, transparency by
 // continuing the ray (RT_TRANS_ORIG). eyeLight and the unlit default mode are
-// the same code with one headlight. The same source is meant to be compiled
-// to Metal later (-target metal).
+// the same code with one headlight. Code that only the Metal output needs is
+// under TACHYON_METAL, so the SPIR-V does not change with it. The Metal
+// backend computes the bounding boxes on the CPU (genAabbs is Vulkan only).
 
 static const float MINCONTRIB = 0.001959;
 
@@ -323,6 +327,27 @@ Hit closestHit(float3 o, float3 d, float tmin, float tmax)
     ray.Direction = d;
     ray.TMin = tmin;
     ray.TMax = tmax;
+#if defined(TACHYON_METAL)
+    // Metal: triangles are reported as candidates too (forced non-opaque) and
+    // committed here, so "best" always is the committed distance and a sphere
+    // or cylinder behind a committed triangle is never committed over it.
+    RayQuery<RAY_FLAG_FORCE_NON_OPAQUE> q;
+    q.TraceRayInline(tlas, RAY_FLAG_FORCE_NON_OPAQUE, 0xFF, ray);
+    float best = ray.TMax;
+    while (q.Proceed())
+    {
+        if (q.CandidateType() == CANDIDATE_NON_OPAQUE_TRIANGLE)
+        {
+            float t = q.CandidateTriangleRayT();
+            if (t > tmin && t < best)
+            {
+                best = t;
+                q.CommitNonOpaqueTriangleHit();
+            }
+        }
+        else if (q.CandidateType() == CANDIDATE_PROCEDURAL_PRIMITIVE)
+        {
+#else
     RayQuery<RAY_FLAG_NONE> q;
     q.TraceRayInline(tlas, RAY_FLAG_NONE, 0xFF, ray);
     float best = ray.TMax;
@@ -330,6 +355,7 @@ Hit closestHit(float3 o, float3 d, float tmin, float tmax)
     {
         if (q.CandidateType() == CANDIDATE_PROCEDURAL_PRIMITIVE)
         {
+#endif
             float t;
             if (procHit(q.CandidateInstanceID(), q.CandidatePrimitiveIndex(),
                     q.CandidateObjectRayOrigin(), q.CandidateObjectRayDirection(),
@@ -368,6 +394,31 @@ bool occluded(float3 o, float3 d, float tmin, float tmax)
     ray.Direction = d;
     ray.TMin = tmin;
     ray.TMax = tmax;
+#if defined(TACHYON_METAL)
+    // Slang's Metal output ignores RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH:
+    // stop at the first blocking candidate instead (triangles are forced
+    // non-opaque so that they are reported here as well).
+    RayQuery<RAY_FLAG_FORCE_NON_OPAQUE> q;
+    q.TraceRayInline(tlas, RAY_FLAG_FORCE_NON_OPAQUE, 0xFF, ray);
+    while (q.Proceed())
+    {
+        if (q.CandidateType() == CANDIDATE_NON_OPAQUE_TRIANGLE)
+        {
+            float t = q.CandidateTriangleRayT();
+            if (t > tmin && t < tmax)
+                return true;
+        }
+        else if (q.CandidateType() == CANDIDATE_PROCEDURAL_PRIMITIVE)
+        {
+            float t;
+            if (procHit(q.CandidateInstanceID(), q.CandidatePrimitiveIndex(),
+                    q.CandidateObjectRayOrigin(), q.CandidateObjectRayDirection(),
+                    tmin, tmax, t))
+                return true;
+        }
+    }
+    return false;
+#else
     RayQuery<RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH> q;
     q.TraceRayInline(tlas, RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH, 0xFF, ray);
     while (q.Proceed())
@@ -382,6 +433,7 @@ bool occluded(float3 o, float3 d, float tmin, float tmax)
         }
     }
     return q.CommittedStatus() != COMMITTED_NOTHING;
+#endif
 }
 
 // Samplers ///////////////////////////////////////////////////////////////////

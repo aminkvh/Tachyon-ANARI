@@ -28,8 +28,9 @@ std::unique_ptr<SceneBackend> createCpuBackend();
 void prefetchBackend(const std::string &preference);
 void waitForBackendPrefetch();
 
-// 'preference': auto | cpu | vulkan. Never fails: falls back to the CPU
-// backend (with a warning when a GPU backend was requested or broke).
+// 'preference': auto | cpu | vulkan | metal; 'auto' tries Metal, then Vulkan
+// (whichever this build has). Never fails: falls back to the CPU backend (with
+// a warning when a GPU backend was requested or broke).
 BackendChoice createBackend(const std::string &preference);
 
 } // namespace tachyon_anari

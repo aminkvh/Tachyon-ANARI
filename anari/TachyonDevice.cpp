@@ -301,9 +301,10 @@ void TachyonDevice::deviceCommitParameters()
 
   const char *env = std::getenv("TACHYON_BACKEND");
   std::string backend = getParamString("backend", env && *env ? env : "auto");
-  if (backend != "auto" && backend != "cpu" && backend != "vulkan") {
+  if (backend != "auto" && backend != "cpu" && backend != "vulkan"
+      && backend != "metal") {
     reportMessage(ANARI_SEVERITY_WARNING,
-        "unknown backend '%s' (expected auto, cpu or vulkan), using auto",
+        "unknown backend '%s' (expected auto, cpu, vulkan or metal), using auto",
         backend.c_str());
     backend = "auto";
   }

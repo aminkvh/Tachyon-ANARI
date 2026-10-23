@@ -150,8 +150,20 @@ jobs:
             # Keep the DLL free of MinGW runtime dependencies so MSVC hosts can load it.
             args+=("-DCMAKE_SHARED_LINKER_FLAGS=-static-libgcc -static-libstdc++")
           fi
+          if [ "$RUNNER_OS" = "macOS" ]; then
+            # The Metal backend (Objective-C++) must build warning-free.
+            args+=("-DCMAKE_OBJCXX_FLAGS=-Werror")
+          fi
           cmake "${args[@]}"
-          cmake --build build --parallel
+          set -o pipefail
+          cmake --build build --parallel 2>&1 | tee anari-build.log
+          if [ "$RUNNER_OS" = "macOS" ]; then
+            grep -q "TACHYON_ANARI_METAL:BOOL=ON" build/CMakeCache.txt
+            if grep -E "(anari/[^ ]*: *warning:)|(^ld: warning)" anari-build.log; then
+              echo "::error::warnings while building the ANARI device"
+              exit 1
+            fi
+          fi
 
       - name: Smoke test (anariRenderTests)
         run: |
@@ -177,6 +189,51 @@ jobs:
           count=$(ls *.png 2>/dev/null | wc -l)
           echo "PNG files written: $count"
           test "$count" -ge 1
+
+      - name: Metal backend falls back to the CPU (runner GPU has no ray tracing)
+        if: runner.os == 'macOS'
+        run: |
+          sdk_bin="$(cd "$ANARI_PREFIX/bin" && pwd)"
+          sdk_lib="$(cd "$ANARI_PREFIX" && pwd)/lib"
+          dev_dir="$(cd build/anari && pwd)"
+          export PATH="$sdk_bin:$dev_dir:$PATH"
+          export DYLD_LIBRARY_PATH="$sdk_lib:$dev_dir${DYLD_LIBRARY_PATH:+:$DYLD_LIBRARY_PATH}"
+          export TACHYON_METAL_DEBUG=1
+          for be in metal auto; do
+            mkdir -p "metal-$be"
+            (
+              cd "metal-$be"
+              status=0
+              TACHYON_BACKEND=$be anariRenderTests --library tachyon > render.log 2>&1 || status=$?
+              cat render.log
+              count=$(find . -maxdepth 1 -name '*.png' | wc -l)
+              echo "backend=$be: exit status $status, PNG files written: $count"
+              if [ "$status" -ne 0 ]; then
+                echo "::error::anariRenderTests (TACHYON_BACKEND=$be) exited with status $status"
+                exit 1
+              fi
+              if ! grep -q -F "[tachyon metal] context init" render.log; then
+                echo "::error::TACHYON_BACKEND=$be did not try the Metal backend"
+                exit 1
+              fi
+              if grep -q -F "[tachyon metal] using" render.log; then
+                echo "::error::the runner unexpectedly has a ray tracing GPU; this check expects the CPU fallback"
+                exit 1
+              fi
+              unavailable=$(grep -c -F "Metal backend unavailable" render.log || true)
+              if [ "$be" = metal ] && [ "$unavailable" -eq 0 ]; then
+                echo "::error::TACHYON_BACKEND=metal fell back without the 'Metal backend unavailable' warning"
+                exit 1
+              fi
+              if [ "$be" = auto ] && [ "$unavailable" -ne 0 ]; then
+                echo "::error::TACHYON_BACKEND=auto warned instead of quietly using the CPU backend"
+                exit 1
+              fi
+              line=$(grep -F "[tachyon metal] shader source" render.log | head -n 1 || true)
+              if [ -n "$line" ]; then echo "::notice::$line"; fi
+              test "$count" -ge 1
+            )
+          done
 
       - name: Package
         run: |
@@ -235,13 +292,24 @@ jobs:
             diff shader-out/committed.h shader-out/raytrace.spv.h | head -n 40 || true
           fi
 
-      - name: Compile raytrace.slang to Metal
+      - name: Compile raytrace.slang to Metal and compare with committed header
         run: |
           slangc="$PWD/deps/slang/bin/slangc"
           "$slangc" anari/gpu/shaders/raytrace.slang \
-            -target metal -entry genAabbs -stage compute -entry main -stage compute \
+            -target metal -DTACHYON_METAL -line-directive-mode none \
+            -entry main -stage compute \
             -o shader-out/raytrace.metal
           wc -l shader-out/raytrace.metal
+          cmake -DINPUT=shader-out/raytrace.metal -DOUTPUT=shader-out/raytrace.metal.h \
+            -DNAME=kRaytraceMsl -DTEXT=ON -P anari/gpu/embed_spirv.cmake
+          tr -d '\r' < anari/gpu/shaders/raytrace.metal.h > shader-out/committed-metal.h
+          if cmp -s shader-out/committed-metal.h shader-out/raytrace.metal.h; then
+            echo "Metal header matches the committed raytrace.metal.h"
+          else
+            echo "::error::raytrace.metal.h is out of date (regenerate it with TACHYON_REGENERATE_SHADERS=ON)"
+            diff shader-out/committed-metal.h shader-out/raytrace.metal.h | head -n 40 || true
+            exit 1
+          fi
 
       - name: Compile Metal source with Apple's compiler
         run: |
@@ -382,31 +450,6 @@ jobs:
           name: vulkan-sw-render
           path: render-out/
           if-no-files-found: ignore
-
-  metal-probe:
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [macos-latest, macos-15, macos-14]
-    runs-on: ${{ matrix.os }}
-    timeout-minutes: 20
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Host and display info
-        run: |
-          echo "runner image: ${ImageOS:-unknown} ${ImageVersion:-unknown}"
-          sw_vers || true
-          echo "cpu: $(sysctl -n machdep.cpu.brand_string || echo unknown)"
-          system_profiler SPDisplaysDataType || true
-
-      - name: Metal capability probe
-        run: |
-          if ! swiftc -O .github/probe/metal_probe.swift -o metal_probe; then
-            echo "::warning::metal_probe.swift failed to compile"
-            exit 0
-          fi
-          ./metal_probe || echo "::warning::metal_probe exited with status $?"
 
   release:
     if: startsWith(github.ref, 'refs/tags/v')

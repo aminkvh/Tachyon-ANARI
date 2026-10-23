@@ -25,18 +25,37 @@ add_library(anari_library_tachyon SHARED
   Frame.cpp
 )
 
-# Vulkan GPU backend (hardware ray tracing through ray queries). volk loads
-# Vulkan at run time, so the device still works on machines without it. Off on
-# macOS by default (no Vulkan ray tracing there; a Metal backend will follow).
+# GPU backends (hardware ray tracing through ray queries): Vulkan on Windows
+# and Linux, Metal on macOS. Both run shaders/raytrace.slang, compiled ahead
+# of time (the results are committed, so slangc is only needed to change it).
+# volk loads Vulkan at run time and Metal is a system framework, so the device
+# still works on machines without a capable GPU (it then uses the CPU).
 if(APPLE)
   set(_tachyon_vulkan_default OFF)
+  set(_tachyon_metal_default ON)
 else()
   set(_tachyon_vulkan_default ON)
+  set(_tachyon_metal_default OFF)
 endif()
 option(TACHYON_ANARI_VULKAN "Build the Vulkan GPU backend of the ANARI device"
   ${_tachyon_vulkan_default})
+option(TACHYON_ANARI_METAL "Build the Metal GPU backend of the ANARI device (macOS)"
+  ${_tachyon_metal_default})
 option(TACHYON_REGENERATE_SHADERS
-  "Recompile anari/gpu/shaders/*.slang with slangc (the SPIR-V is committed)" OFF)
+  "Recompile anari/gpu/shaders/*.slang with slangc (the outputs are committed)" OFF)
+if(TACHYON_ANARI_METAL AND NOT APPLE)
+  message(WARNING "TACHYON_ANARI_METAL needs macOS; building without the Metal backend")
+  set(TACHYON_ANARI_METAL OFF CACHE BOOL "" FORCE)
+endif()
+
+set(_shader_dir ${CMAKE_CURRENT_SOURCE_DIR}/gpu/shaders)
+if(TACHYON_REGENERATE_SHADERS)
+  find_program(SLANGC_EXECUTABLE slangc REQUIRED)
+endif()
+
+if(TACHYON_ANARI_VULKAN OR TACHYON_ANARI_METAL)
+  target_sources(anari_library_tachyon PRIVATE gpu/GpuScene.cpp)
+endif()
 
 if(TACHYON_ANARI_VULKAN)
   include(FetchContent)
@@ -62,8 +81,6 @@ if(TACHYON_ANARI_VULKAN)
   target_link_libraries(anari_library_tachyon PRIVATE volk Vulkan::Headers)
 
   if(TACHYON_REGENERATE_SHADERS)
-    find_program(SLANGC_EXECUTABLE slangc REQUIRED)
-    set(_shader_dir ${CMAKE_CURRENT_SOURCE_DIR}/gpu/shaders)
     set(_spv ${CMAKE_CURRENT_BINARY_DIR}/raytrace.spv)
     add_custom_command(
       OUTPUT ${_shader_dir}/raytrace.spv.h
@@ -78,8 +95,41 @@ if(TACHYON_ANARI_VULKAN)
         ${CMAKE_CURRENT_SOURCE_DIR}/gpu/embed_spirv.cmake
       COMMENT "Compiling raytrace.slang to SPIR-V"
       VERBATIM)
-    add_custom_target(tachyon_shaders DEPENDS ${_shader_dir}/raytrace.spv.h)
-    add_dependencies(anari_library_tachyon tachyon_shaders)
+    add_custom_target(tachyon_shaders_spirv DEPENDS ${_shader_dir}/raytrace.spv.h)
+    add_dependencies(anari_library_tachyon tachyon_shaders_spirv)
+  endif()
+endif()
+
+if(TACHYON_ANARI_METAL)
+  enable_language(OBJCXX)
+  target_sources(anari_library_tachyon PRIVATE
+    gpu/metal/MetalContext.mm
+    gpu/metal/MetalScene.mm)
+  set_source_files_properties(gpu/metal/MetalContext.mm gpu/metal/MetalScene.mm
+    PROPERTIES COMPILE_OPTIONS "-fobjc-arc")
+  target_compile_definitions(anari_library_tachyon PRIVATE TACHYON_ANARI_METAL)
+  target_link_libraries(anari_library_tachyon PRIVATE
+    "-framework Metal" "-framework Foundation")
+
+  if(TACHYON_REGENERATE_SHADERS)
+    # Metal source text: the device compiles it when it starts (no Xcode
+    # needed to build or run)
+    set(_msl ${CMAKE_CURRENT_BINARY_DIR}/raytrace.metal)
+    add_custom_command(
+      OUTPUT ${_shader_dir}/raytrace.metal.h
+      COMMAND ${SLANGC_EXECUTABLE} ${_shader_dir}/raytrace.slang
+        -target metal -DTACHYON_METAL -line-directive-mode none
+        -entry main -stage compute
+        -o ${_msl}
+      COMMAND ${CMAKE_COMMAND} -DINPUT=${_msl}
+        -DOUTPUT=${_shader_dir}/raytrace.metal.h -DNAME=kRaytraceMsl -DTEXT=ON
+        -P ${CMAKE_CURRENT_SOURCE_DIR}/gpu/embed_spirv.cmake
+      DEPENDS ${_shader_dir}/raytrace.slang
+        ${CMAKE_CURRENT_SOURCE_DIR}/gpu/embed_spirv.cmake
+      COMMENT "Compiling raytrace.slang to Metal source"
+      VERBATIM)
+    add_custom_target(tachyon_shaders_metal DEPENDS ${_shader_dir}/raytrace.metal.h)
+    add_dependencies(anari_library_tachyon tachyon_shaders_metal)
   endif()
 endif()
 
