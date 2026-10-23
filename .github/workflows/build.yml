@@ -2,7 +2,7 @@ name: build
 
 on:
   push:
-    branches: [master, cpu-optimization, anari-device]
+    branches: [master, cpu-optimization, anari-device, gpu-backend]
     tags: ['v*']
   pull_request:
 

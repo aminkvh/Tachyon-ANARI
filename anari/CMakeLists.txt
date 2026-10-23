@@ -13,6 +13,7 @@ add_library(anari_library_tachyon SHARED
   TachyonDevice.cpp
   TachyonGlobalState.cpp
   TachyonScene.cpp
+  Backends.cpp
   Object.cpp
   Camera.cpp
   Geometry.cpp
@@ -23,6 +24,64 @@ add_library(anari_library_tachyon SHARED
   Renderer.cpp
   Frame.cpp
 )
+
+# Vulkan GPU backend (hardware ray tracing through ray queries). volk loads
+# Vulkan at run time, so the device still works on machines without it. Off on
+# macOS by default (no Vulkan ray tracing there; a Metal backend will follow).
+if(APPLE)
+  set(_tachyon_vulkan_default OFF)
+else()
+  set(_tachyon_vulkan_default ON)
+endif()
+option(TACHYON_ANARI_VULKAN "Build the Vulkan GPU backend of the ANARI device"
+  ${_tachyon_vulkan_default})
+option(TACHYON_REGENERATE_SHADERS
+  "Recompile anari/gpu/shaders/*.slang with slangc (the SPIR-V is committed)" OFF)
+
+if(TACHYON_ANARI_VULKAN)
+  include(FetchContent)
+  # Pinned: Vulkan-Headers v1.4.363 and the volk release made for it
+  # (vulkan-sdk-1.4.363.0). No Vulkan SDK is needed to build.
+  FetchContent_Declare(vulkan_headers
+    GIT_REPOSITORY https://github.com/KhronosGroup/Vulkan-Headers.git
+    GIT_TAG v1.4.363
+    GIT_SHALLOW TRUE
+    EXCLUDE_FROM_ALL)
+  FetchContent_Declare(volk
+    GIT_REPOSITORY https://github.com/zeux/volk.git
+    GIT_TAG vulkan-sdk-1.4.363.0
+    GIT_SHALLOW TRUE
+    EXCLUDE_FROM_ALL)
+  FetchContent_MakeAvailable(vulkan_headers volk)
+  set_target_properties(volk PROPERTIES POSITION_INDEPENDENT_CODE ON)
+
+  target_sources(anari_library_tachyon PRIVATE
+    gpu/VulkanContext.cpp
+    gpu/VulkanScene.cpp)
+  target_compile_definitions(anari_library_tachyon PRIVATE TACHYON_ANARI_VULKAN)
+  target_link_libraries(anari_library_tachyon PRIVATE volk Vulkan::Headers)
+
+  if(TACHYON_REGENERATE_SHADERS)
+    find_program(SLANGC_EXECUTABLE slangc REQUIRED)
+    set(_shader_dir ${CMAKE_CURRENT_SOURCE_DIR}/gpu/shaders)
+    set(_spv ${CMAKE_CURRENT_BINARY_DIR}/raytrace.spv)
+    add_custom_command(
+      OUTPUT ${_shader_dir}/raytrace.spv.h
+      COMMAND ${SLANGC_EXECUTABLE} ${_shader_dir}/raytrace.slang
+        -target spirv -profile spirv_1_4 -capability spvRayQueryKHR
+        -entry genAabbs -stage compute -entry main -stage compute
+        -o ${_spv}
+      COMMAND ${CMAKE_COMMAND} -DINPUT=${_spv}
+        -DOUTPUT=${_shader_dir}/raytrace.spv.h -DNAME=kRaytraceSpv
+        -P ${CMAKE_CURRENT_SOURCE_DIR}/gpu/embed_spirv.cmake
+      DEPENDS ${_shader_dir}/raytrace.slang
+        ${CMAKE_CURRENT_SOURCE_DIR}/gpu/embed_spirv.cmake
+      COMMENT "Compiling raytrace.slang to SPIR-V"
+      VERBATIM)
+    add_custom_target(tachyon_shaders DEPENDS ${_shader_dir}/raytrace.spv.h)
+    add_dependencies(anari_library_tachyon tachyon_shaders)
+  endif()
+endif()
 
 # Generated ANARI object/parameter/extension query tables.
 anari_generate_queries(

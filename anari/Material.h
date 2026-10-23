@@ -6,7 +6,7 @@
 #include "Geometry.h"
 #include "Object.h"
 #include "Sampler.h"
-#include "TachyonScene.h"
+#include "SceneBackend.h"
 
 namespace tachyon_anari {
 

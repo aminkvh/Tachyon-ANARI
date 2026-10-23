@@ -3,10 +3,13 @@
 // SPDX-License-Identifier: Apache-2.0
 
 #include "Frame.h"
+#include "Backends.h"
 // std
 #include <algorithm>
 #include <chrono>
 #include <cstring>
+#include <exception>
+#include <stdexcept>
 #include <cmath>
 #include <limits>
 #include <memory>
@@ -33,7 +36,7 @@ struct AttributeStyleBinder : public PrimStyleBinder
 {
   static constexpr int kLevels = 15;
 
-  TachyonScene *scene{nullptr};
+  SceneBackend *scene{nullptr};
   const Material *material{nullptr};
   SurfaceStyle baseStyle;
   float colorAlpha{1.f};
@@ -78,6 +81,15 @@ struct AttributeStyleBinder : public PrimStyleBinder
     cache.emplace(key, id);
     return id;
   }
+};
+} // namespace
+
+namespace {
+// Thrown while building a scene the GPU backend cannot render faithfully yet
+// (only used with backend=auto, which then falls back to the CPU backend).
+struct UnsuitableScene : std::runtime_error
+{
+  using std::runtime_error::runtime_error;
 };
 } // namespace
 
@@ -163,11 +175,11 @@ void Frame::rebuildScene(helium::TimeStamp sceneStamp)
 
   m_lit = !lights.empty() && !m_renderer->eyeLight();
   m_builtEyeLight = m_renderer->eyeLight();
-  m_scene.reset(m_lit, state->numThreads);
+  m_scene->reset(m_lit, state->numThreads);
 
   if (m_lit) {
     for (auto &li : lights)
-      li.light->emit(m_scene, li.xfm);
+      li.light->emit(*m_scene, li.xfm);
   }
 
   for (auto &si : surfaces) {
@@ -324,7 +336,7 @@ void Frame::rebuildScene(helium::TimeStamp sceneStamp)
 
       if (mask || primSampled) {
         auto b = std::make_unique<AttributeStyleBinder>();
-        b->scene = &m_scene;
+        b->scene = m_scene.get();
         b->material = m;
         b->baseStyle = style;
         b->colorAlpha = colorAlpha;
@@ -341,14 +353,20 @@ void Frame::rebuildScene(helium::TimeStamp sceneStamp)
     }
 
     if (binder) {
-      g->emit(m_scene, -1, si.xfm, colorAttr, binder.get(), colorSampler);
+      g->emit(*m_scene, -1, si.xfm, colorAttr, binder.get(), colorSampler);
       continue;
     }
-    const int id = m_scene.addStyle(style);
-    g->emit(m_scene, id, si.xfm, colorAttr, nullptr, colorSampler);
+    const int id = m_scene->addStyle(style);
+    g->emit(*m_scene, id, si.xfm, colorAttr, nullptr, colorSampler);
   }
 
-  m_scene.finishBuild();
+  m_scene->finishBuild();
+
+  if (m_backendGpu && deviceState()->backend == "auto"
+      && (m_scene->numTriangles() || m_scene->numCylinders() || m_lit))
+    throw UnsuitableScene(
+        "the scene has triangles, cylinders or lights, which the GPU backend "
+        "does not support yet");
 
   m_builtStamp = sceneStamp;
   m_builtWorld = m_world.ptr;
@@ -358,9 +376,9 @@ void Frame::rebuildScene(helium::TimeStamp sceneStamp)
   reportMessage(ANARI_SEVERITY_DEBUG,
       "tachyon: rebuilt scene (%zu triangles, %zu spheres, %zu cylinders, "
       "%zu lights)",
-      m_scene.numTriangles(),
-      m_scene.numSpheres(),
-      m_scene.numCylinders(),
+      m_scene->numTriangles(),
+      m_scene->numSpheres(),
+      m_scene->numCylinders(),
       lights.size());
 }
 
@@ -394,8 +412,47 @@ void Frame::renderFrame()
 
   std::lock_guard<std::mutex> lock(tachyonMutex());
 
+  ensureBackend();
+  try {
+    renderScene(state->sceneStamp.load());
+  } catch (const std::exception &e) {
+    if (!m_backendGpu)
+      throw;
+    reportMessage(dynamic_cast<const UnsuitableScene *>(&e)
+            ? ANARI_SEVERITY_INFO
+            : ANARI_SEVERITY_WARNING,
+        "tachyon: not using the GPU backend (%s), falling back to the CPU "
+        "backend",
+        e.what());
+    m_scene = createCpuBackend();
+    m_backendGpu = false;
+    m_sceneValid = false;
+    renderScene(state->sceneStamp.load());
+  }
+
+  m_duration = std::chrono::duration<float>(
+      std::chrono::steady_clock::now() - start)
+                   .count();
+}
+
+void Frame::ensureBackend()
+{
+  const std::string &pref = deviceState()->backend;
+  if (m_scene && m_backendPref == pref)
+    return;
+  BackendChoice c = createBackend(pref);
+  for (const std::string &w : c.warnings)
+    reportMessage(ANARI_SEVERITY_WARNING, "tachyon: %s", w.c_str());
+  reportMessage(ANARI_SEVERITY_INFO, "tachyon: using the %s", c.info.c_str());
+  m_scene = std::move(c.scene);
+  m_backendGpu = c.gpu;
+  m_backendPref = pref;
+  m_sceneValid = false;
+}
+
+void Frame::renderScene(helium::TimeStamp sceneStamp)
+{
   // Rebuild geometry + acceleration structure only when scene objects changed
-  const helium::TimeStamp sceneStamp = state->sceneStamp.load();
   if (!m_sceneValid || m_builtWorld != m_world.ptr || sceneStamp > m_builtStamp
       || m_builtEyeLight != m_renderer->eyeLight())
     rebuildScene(sceneStamp);
@@ -405,7 +462,7 @@ void Frame::renderFrame()
       || m_shadedStamp != m_renderer->lastFinalized()) {
     float ambient, diffuse;
     m_renderer->shadingWeights(m_lit, ambient, diffuse);
-    m_scene.setShading(ambient, diffuse);
+    m_scene->setShading(ambient, diffuse);
     m_shadedWith = m_renderer.ptr;
     m_shadedStamp = m_renderer->lastFinalized();
     m_shadingDirty = false;
@@ -415,19 +472,17 @@ void Frame::renderFrame()
   SceneCamera cam;
   m_camera->fill(cam, frameAspect);
 
-  m_scene.setOutput(int(m_size.x), int(m_size.y), m_rgb.data());
-  m_scene.setCamera(cam);
-  m_scene.setDepthOutput(m_depthRaw.empty() ? nullptr : m_depthRaw.data());
+  m_scene->setOutput(int(m_size.x), int(m_size.y), m_rgb.data());
+  m_scene->setCamera(cam);
+  m_scene->setDepthOutput(m_depthRaw.empty() ? nullptr : m_depthRaw.data());
   const float4 &bg = m_renderer->background();
-  m_scene.setBackground(&bg.x);
-  m_scene.setSamples(m_renderer->pixelSamples());
+  m_scene->setBackground(&bg.x);
+  m_scene->setSamples(m_renderer->pixelSamples());
 
-  m_scene.render();
+  m_scene->render();
+  for (const std::string &w : m_scene->takeWarnings())
+    reportMessage(ANARI_SEVERITY_WARNING, "tachyon: %s", w.c_str());
   writePixels();
-
-  m_duration = std::chrono::duration<float>(
-      std::chrono::steady_clock::now() - start)
-                   .count();
 }
 
 void Frame::writePixels()

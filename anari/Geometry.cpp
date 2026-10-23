@@ -194,7 +194,7 @@ static void fillAttrValues(unsigned mask,
   }
 }
 
-void Triangle::emit(TachyonScene &scene,
+void Triangle::emit(SceneBackend &scene,
     int style,
     const mat4 &xfm,
     int colorAttr,
@@ -437,7 +437,7 @@ void Sphere::finalize()
   m_valid = true;
 }
 
-void Sphere::emit(TachyonScene &scene,
+void Sphere::emit(SceneBackend &scene,
     int style,
     const mat4 &xfm,
     int colorAttr,
@@ -664,7 +664,7 @@ void Cylinder::finalize()
   m_valid = true;
 }
 
-void Cylinder::emit(TachyonScene &scene,
+void Cylinder::emit(SceneBackend &scene,
     int style,
     const mat4 &xfm,
     int colorAttr,

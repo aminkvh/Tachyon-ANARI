@@ -9,6 +9,7 @@
 #include <atomic>
 #include <cstdint>
 #include <mutex>
+#include <string>
 
 namespace tachyon_anari {
 
@@ -27,6 +28,9 @@ struct TachyonGlobalState : public helium::BaseGlobalDeviceState
   std::atomic<uint64_t> sceneBuilds{0};
 
   int numThreads{-1}; // <= 0: one per CPU
+
+  // "backend" device parameter: auto | cpu | vulkan
+  std::string backend{"auto"};
 
   anari::Device anariDevice{nullptr};
 

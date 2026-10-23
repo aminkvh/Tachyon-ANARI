@@ -26,6 +26,19 @@
   },
   "objects": [
     {
+      "type": "ANARI_DEVICE",
+      "parameters": [
+        {
+          "name": "backend",
+          "types": ["ANARI_STRING"],
+          "tags": [],
+          "default": "auto",
+          "values": ["auto", "cpu", "vulkan"],
+          "description": "which renderer executes the frames: 'cpu' (Tachyon core), 'vulkan' (hardware ray tracing through Vulkan ray queries; experimental, spheres only) or 'auto' (Vulkan if a capable GPU exists, otherwise cpu). The TACHYON_BACKEND environment variable sets the default."
+        }
+      ]
+    },
+    {
       "type": "ANARI_RENDERER",
       "name": "default",
       "parameters": [

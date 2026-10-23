@@ -4,7 +4,7 @@
 #pragma once
 
 #include "Object.h"
-#include "TachyonScene.h"
+#include "SceneBackend.h"
 
 namespace tachyon_anari {
 
@@ -17,7 +17,7 @@ struct Light : public Object
   bool affectsScene() const override { return true; }
 
   // Adds the light to the Tachyon scene, transformed by 'xfm'
-  virtual void emit(TachyonScene &, const mat4 &) const {}
+  virtual void emit(SceneBackend &, const mat4 &) const {}
 
  protected:
   float3 m_color{1.f, 1.f, 1.f};
@@ -27,7 +27,7 @@ struct DirectionalLight : public Light
 {
   DirectionalLight(TachyonGlobalState *s) : Light(s) {}
   void commitParameters() override;
-  void emit(TachyonScene &scene, const mat4 &xfm) const override;
+  void emit(SceneBackend &scene, const mat4 &xfm) const override;
 
  private:
   float3 m_direction{0.f, 0.f, -1.f}; // direction the light travels
@@ -38,7 +38,7 @@ struct PointLight : public Light
 {
   PointLight(TachyonGlobalState *s) : Light(s) {}
   void commitParameters() override;
-  void emit(TachyonScene &scene, const mat4 &xfm) const override;
+  void emit(SceneBackend &scene, const mat4 &xfm) const override;
 
  private:
   float3 m_position{0.f, 0.f, 0.f};

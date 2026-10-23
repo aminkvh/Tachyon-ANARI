@@ -6,11 +6,13 @@
 
 #include "Camera.h"
 #include "Renderer.h"
-#include "TachyonScene.h"
+#include "SceneBackend.h"
 #include "World.h"
 // helium
 #include "helium/BaseFrame.h"
 // std
+#include <memory>
+#include <string>
 #include <vector>
 
 namespace tachyon_anari {
@@ -45,6 +47,8 @@ struct Frame : public helium::BaseFrame
 
  private:
   void rebuildScene(helium::TimeStamp sceneStamp);
+  void ensureBackend();
+  void renderScene(helium::TimeStamp sceneStamp);
   void writePixels();
   void fillWithBackground();
 
@@ -65,7 +69,9 @@ struct Frame : public helium::BaseFrame
   helium::IntrusivePtr<World> m_world;
 
   // Change tracking: what the current Tachyon scene was built from
-  TachyonScene m_scene;
+  std::unique_ptr<SceneBackend> m_scene;
+  std::string m_backendPref; // the "backend" device parameter m_scene follows
+  bool m_backendGpu{false};
   bool m_sceneValid{false};
   bool m_lit{false};
   bool m_builtEyeLight{false};

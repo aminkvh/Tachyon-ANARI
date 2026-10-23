@@ -25,7 +25,7 @@ void DirectionalLight::commitParameters()
   m_irradiance = getParam<float>("irradiance", 1.f);
 }
 
-void DirectionalLight::emit(TachyonScene &scene, const mat4 &xfm) const
+void DirectionalLight::emit(SceneBackend &scene, const mat4 &xfm) const
 {
   // ANARI's direction is where the light travels; Tachyon uses the same convention.
   const float4 d = linalg::mul(xfm, float4(m_direction, 0.f));
@@ -48,7 +48,7 @@ void PointLight::commitParameters()
     m_intensity = getParam<float>("power", 0.f) / (4.f * float(M_PI));
 }
 
-void PointLight::emit(TachyonScene &scene, const mat4 &xfm) const
+void PointLight::emit(SceneBackend &scene, const mat4 &xfm) const
 {
   const float4 p = linalg::mul(xfm, float4(m_position, 1.f));
   const float3 pos(p.x, p.y, p.z);

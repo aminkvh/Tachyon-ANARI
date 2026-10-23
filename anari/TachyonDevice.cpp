@@ -295,6 +295,16 @@ void TachyonDevice::initDevice()
 void TachyonDevice::deviceCommitParameters()
 {
   helium::BaseDevice::deviceCommitParameters();
+
+  const char *env = std::getenv("TACHYON_BACKEND");
+  std::string backend = getParamString("backend", env && *env ? env : "auto");
+  if (backend != "auto" && backend != "cpu" && backend != "vulkan") {
+    reportMessage(ANARI_SEVERITY_WARNING,
+        "unknown backend '%s' (expected auto, cpu or vulkan), using auto",
+        backend.c_str());
+    backend = "auto";
+  }
+  deviceState()->backend = backend;
 }
 
 #define TACHYON_STRINGIFY(s) TACHYON_STRINGIFY2(s)

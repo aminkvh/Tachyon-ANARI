@@ -5,7 +5,7 @@
 
 #include "Object.h"
 #include "Sampler.h"
-#include "TachyonScene.h"
+#include "SceneBackend.h"
 // std
 #include <array>
 #include <optional>
@@ -66,7 +66,7 @@ struct Geometry : public Object
   // 'colorSampler' (may be nullptr): maps the values of 'colorAttr' (or, for a
   // primitive sampler, the primitive index; then 'colorAttr' is < 0) to the
   // colors.
-  virtual void emit(TachyonScene &,
+  virtual void emit(SceneBackend &,
       int,
       const mat4 &,
       int,
@@ -88,7 +88,7 @@ struct Triangle : public Geometry
   bool isValid() const override { return m_valid; }
 
   ColorSource attributeSource(int attr) const override;
-  void emit(TachyonScene &scene,
+  void emit(SceneBackend &scene,
       int style,
       const mat4 &xfm,
       int colorAttr,
@@ -139,7 +139,7 @@ struct Sphere : public AttributedGeometry
   void commitParameters() override;
   void finalize() override;
 
-  void emit(TachyonScene &scene,
+  void emit(SceneBackend &scene,
       int style,
       const mat4 &xfm,
       int colorAttr,
@@ -160,7 +160,7 @@ struct Cylinder : public AttributedGeometry
   void commitParameters() override;
   void finalize() override;
 
-  void emit(TachyonScene &scene,
+  void emit(SceneBackend &scene,
       int style,
       const mat4 &xfm,
       int colorAttr,
