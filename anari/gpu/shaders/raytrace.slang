@@ -1,132 +1,776 @@
 // Copyright (c) 2026 Tachyon-dev contributors
 // SPDX-License-Identifier: Apache-2.0
 
-// Phase 1 (spike) shaders of the Vulkan backend: spheres only, eyeLight
-// shading. Compiled to SPIR-V by slangc (see anari/gpu/CMakeLists.txt and
-// TACHYON_REGENERATE_SHADERS); the result is committed as raytrace.spv.h.
+// Shaders of the Vulkan backend. Compiled to SPIR-V by slangc (see
+// anari/gpu/CMakeLists.txt and TACHYON_REGENERATE_SHADERS); the result is
+// committed as raytrace.spv.h.
 //
 //   slangc raytrace.slang -target spirv -profile spirv_1_4 \
 //     -capability spvRayQueryKHR -entry genAabbs -stage compute \
 //     -entry main -stage compute -o raytrace.spv
 //
-// The same source is meant to be compiled to Metal later (-target metal).
+// The shading is a port of Tachyon's full shader (src/shade.c) as the CPU
+// backend drives it: constant ambient + sum of Lambertian lights (with
+// shadow rays) times the surface color, Blinn highlights, transparency by
+// continuing the ray (RT_TRANS_ORIG). eyeLight and the unlit default mode are
+// the same code with one headlight. The same source is meant to be compiled
+// to Metal later (-target metal).
 
-struct PushConstants
+static const float MINCONTRIB = 0.001959;
+
+struct FrameData
 {
     float4 posOrtho; // camera position, w: 1 = orthographic
-    float4 fwdU0; // forward, w: image plane u of the first pixel center
+    float4 fwdU0; // forward, w: image plane u of the first pixel (corner)
     float4 rightDu; // right, w: u step per pixel
-    float4 upV0; // up, w: image plane v of the first (top) pixel center
-    float4 shade; // x: ambient weight, y: diffuse weight, z: v step per pixel
-    float4 bg; // background color
-    float4 baseColor; // color of all spheres when there is no color buffer
-    uint2 size; // image size
-    uint2 flags; // x: color buffer present, y: write depth
+    float4 upV0; // up, w: image plane v of the first (top) pixel (corner)
+    float4 shade; // x: ambient weight, y: diffuse scale, z: v step per pixel
+    float4 bg; // background color, w: alpha
+    float4 unused0;
+    uint4 size; // x,y: image size, z: samples per pixel, w: first sample index
+    uint4 counts; // spheres, cylinders, triangles, lights
+    // x: flags (see below), y: output format, z: max ray depth,
+    // w: primitive set to generate bounding boxes for
+    uint4 flags;
+    uint4 styles; // uniform style id of spheres, of cylinders
 };
 
-[[vk::push_constant]] ConstantBuffer<PushConstants> pc;
+static const uint F_SPHERE_COLORS = 1u;
+static const uint F_SPHERE_STYLES = 2u;
+static const uint F_CYL_COLORS = 4u;
+static const uint F_CYL_STYLES = 8u;
+static const uint F_SHADOWS = 16u;
+static const uint F_DEPTH = 32u;
+static const uint F_ACCUM = 64u; // the accumulation buffer exists
+static const uint F_ACCUM_READ = 128u; // sum in it from previous frames
+static const uint F_BG_ALPHA = 256u; // background alpha < 1
+static const uint F_TRANSPARENT = 512u; // some style has opacity < 1
+
+static const uint FMT_NONE = 0u;
+static const uint FMT_U8 = 1u;
+static const uint FMT_U8_SRGB = 2u;
+static const uint FMT_F32 = 3u;
 
 [[vk::binding(0, 0)]] RaytracingAccelerationStructure tlas;
 [[vk::binding(1, 0)]] StructuredBuffer<float4> spheres; // xyz center, w radius
-[[vk::binding(2, 0)]] StructuredBuffer<float> colors; // 3 floats per sphere
-[[vk::binding(3, 0)]] RWStructuredBuffer<float> outRgb; // 3 floats per pixel
-[[vk::binding(4, 0)]] RWStructuredBuffer<float> outDepth;
-[[vk::binding(5, 0)]] RWStructuredBuffer<float> aabbs; // 6 floats per sphere
+[[vk::binding(2, 0)]] StructuredBuffer<float> sphereColors; // 3 per sphere
+[[vk::binding(3, 0)]] StructuredBuffer<uint> sphereStyles;
+[[vk::binding(4, 0)]] StructuredBuffer<float4> cylinders; // 2 per cylinder
+[[vk::binding(5, 0)]] StructuredBuffer<float> cylColors; // 6 per cylinder
+[[vk::binding(6, 0)]] StructuredBuffer<uint> cylStyles;
+[[vk::binding(7, 0)]] StructuredBuffer<float> triPos; // 9 per triangle
+// 12 per triangle: 3 normals, style, flags, aux offset (uints as floats)
+[[vk::binding(8, 0)]] StructuredBuffer<float> triShade;
+[[vk::binding(9, 0)]] StructuredBuffer<float> triAux; // vertex colors / attributes
+// 2 per style: (rgb, opacity), (diffuse, phong, phong exponent, metal)
+[[vk::binding(10, 0)]] StructuredBuffer<float4> styleTable;
+[[vk::binding(11, 0)]] StructuredBuffer<float4> samplerTable; // 13 per sampler
+[[vk::binding(12, 0)]] StructuredBuffer<float4> texels;
+// 2 per light: (direction to the light | position, 0 directional / 1 point),
+// (color, 0)
+[[vk::binding(13, 0)]] StructuredBuffer<float4> lights;
+[[vk::binding(14, 0)]] RWStructuredBuffer<uint> outPixels;
+[[vk::binding(15, 0)]] RWStructuredBuffer<float> outDepth;
+[[vk::binding(16, 0)]] RWStructuredBuffer<float> accum; // 3 per pixel
+[[vk::binding(17, 0)]] RWStructuredBuffer<float> aabbs; // 6 per primitive
+[[vk::binding(18, 0)]] ConstantBuffer<FrameData> fd;
 
 [shader("compute")]
 [numthreads(64, 1, 1)]
 void genAabbs(uint3 tid : SV_DispatchThreadID)
 {
     uint i = tid.x;
-    if (i >= pc.size.x)
-        return;
+    if (fd.flags.w == 0u)
+    {
+        if (i >= fd.counts.x)
+            return;
+        float4 s = spheres[i];
+        float r = abs(s.w) * 1.00001 + 1e-6;
+        aabbs[6 * i + 0] = s.x - r;
+        aabbs[6 * i + 1] = s.y - r;
+        aabbs[6 * i + 2] = s.z - r;
+        aabbs[6 * i + 3] = s.x + r;
+        aabbs[6 * i + 4] = s.y + r;
+        aabbs[6 * i + 5] = s.z + r;
+    }
+    else
+    {
+        if (i >= fd.counts.y)
+            return;
+        float4 a = cylinders[2 * i];
+        float4 b = cylinders[2 * i + 1];
+        float r = abs(a.w) * 1.00001 + 1e-6;
+        float3 lo = min(a.xyz, b.xyz) - r;
+        float3 hi = max(a.xyz, b.xyz) + r;
+        aabbs[6 * i + 0] = lo.x;
+        aabbs[6 * i + 1] = lo.y;
+        aabbs[6 * i + 2] = lo.z;
+        aabbs[6 * i + 3] = hi.x;
+        aabbs[6 * i + 4] = hi.y;
+        aabbs[6 * i + 5] = hi.z;
+    }
+}
+
+// Primitives ///////////////////////////////////////////////////////////////
+
+// Nearest intersection of the ray with sphere 'i' in (tmin, tmax)
+bool hitSphere(uint i, float3 o, float3 d, float tmin, float tmax, out float t)
+{
+    t = 0.0;
     float4 s = spheres[i];
-    float r = abs(s.w) * 1.00001 + 1e-6;
-    aabbs[6 * i + 0] = s.x - r;
-    aabbs[6 * i + 1] = s.y - r;
-    aabbs[6 * i + 2] = s.z - r;
-    aabbs[6 * i + 3] = s.x + r;
-    aabbs[6 * i + 4] = s.y + r;
-    aabbs[6 * i + 5] = s.z + r;
+    float3 oc = o - s.xyz;
+    float b = dot(oc, d);
+    float3 h = oc - b * d; // closest approach: numerically stable
+    float disc = s.w * s.w - dot(h, h);
+    if (disc < 0.0)
+        return false;
+    float sq = sqrt(disc);
+    float t0 = -b - sq;
+    if (t0 > tmin && t0 < tmax)
+    {
+        t = t0;
+        return true;
+    }
+    float t1 = -b + sq;
+    if (t1 > tmin && t1 < tmax)
+    {
+        t = t1;
+        return true;
+    }
+    return false;
+}
+
+// Finite cylinder with optional flat caps (bit 0: at p0, bit 1: at p1).
+// Returns the nearest hit in (tmin, tmax); 'n' is the outward normal and
+// 'sel' the axial position in [0, 1] of the hit (selects the half's color).
+bool hitCylinder(uint i, float3 o, float3 d, float tmin, float tmax,
+    out float t, out float3 n, out float sel)
+{
+    t = 0.0;
+    n = float3(0, 0, 1);
+    sel = 0.0;
+    float4 a = cylinders[2 * i];
+    float4 b = cylinders[2 * i + 1];
+    uint caps = asuint(b.w);
+    float3 p0 = a.xyz;
+    float r = a.w;
+    float3 axis = b.xyz - p0;
+    float len = length(axis);
+    if (!(len > 0.0))
+        return false;
+    float3 u = axis / len;
+    float3 oc = o - p0;
+    float ocu = dot(oc, u);
+    float du = dot(d, u);
+    float3 dp = d - u * du;
+    float3 op = oc - u * ocu;
+
+    float best = tmax;
+    bool found = false;
+    float A = dot(dp, dp);
+    if (A > 1e-20)
+    {
+        float B = dot(op, dp);
+        float C = dot(op, op) - r * r;
+        float disc = B * B - A * C;
+        if (disc >= 0.0)
+        {
+            float sq = sqrt(disc);
+            float t0 = (-B - sq) / A;
+            float t1 = (-B + sq) / A;
+            [unroll]
+            for (int k = 0; k < 2; k++)
+            {
+                float tt = k == 0 ? t0 : t1;
+                if (tt > tmin && tt < best)
+                {
+                    float s = ocu + tt * du;
+                    if (s >= 0.0 && s <= len)
+                    {
+                        best = tt;
+                        found = true;
+                        float3 radial = op + tt * dp;
+                        n = radial / r;
+                        sel = s / len;
+                    }
+                }
+            }
+        }
+    }
+    if (abs(du) > 1e-12)
+    {
+        [unroll]
+        for (int c = 0; c < 2; c++)
+        {
+            if ((caps & (1u << c)) == 0u)
+                continue;
+            float plane = c == 0 ? 0.0 : len;
+            float tt = (plane - ocu) / du;
+            if (tt > tmin && tt < best)
+            {
+                float3 radial = op + tt * dp;
+                if (dot(radial, radial) <= r * r)
+                {
+                    best = tt;
+                    found = true;
+                    n = c == 0 ? -u : u;
+                    sel = c == 0 ? 0.0 : 1.0;
+                }
+            }
+        }
+    }
+    t = best;
+    return found;
+}
+
+// Closest hit ///////////////////////////////////////////////////////////////
+
+struct Hit
+{
+    bool valid;
+    uint type; // 0 sphere, 1 cylinder, 2 triangle
+    uint prim;
+    float t;
+    float2 bary;
+};
+
+Hit closestHit(float3 o, float3 d, float tmin, float tmax)
+{
+    Hit h;
+    h.valid = false;
+    h.type = 0u;
+    h.prim = 0u;
+    h.t = tmax;
+    h.bary = float2(0, 0);
+
+    RayDesc ray;
+    ray.Origin = o;
+    ray.Direction = d;
+    ray.TMin = tmin;
+    ray.TMax = tmax;
+    RayQuery<RAY_FLAG_NONE> q;
+    q.TraceRayInline(tlas, RAY_FLAG_NONE, 0xFF, ray);
+    float best = ray.TMax;
+    while (q.Proceed())
+    {
+        if (q.CandidateType() == CANDIDATE_PROCEDURAL_PRIMITIVE)
+        {
+            uint type = q.CandidateInstanceID();
+            uint prim = q.CandidatePrimitiveIndex();
+            float t;
+            bool hit;
+            if (type == 0u)
+                hit = hitSphere(prim, o, d, tmin, best, t);
+            else
+            {
+                float3 n;
+                float sel;
+                hit = hitCylinder(prim, o, d, tmin, best, t, n, sel);
+            }
+            if (hit && t < best)
+            {
+                best = t;
+                q.CommitProceduralPrimitiveHit(t);
+            }
+        }
+    }
+    uint status = q.CommittedStatus();
+    if (status == COMMITTED_PROCEDURAL_PRIMITIVE_HIT)
+    {
+        h.valid = true;
+        h.type = q.CommittedInstanceID();
+        h.prim = q.CommittedPrimitiveIndex();
+        h.t = best;
+    }
+    else if (status == COMMITTED_TRIANGLE_HIT)
+    {
+        h.valid = true;
+        h.type = 2u;
+        h.prim = q.CommittedPrimitiveIndex();
+        h.t = q.CommittedRayT();
+        h.bary = q.CommittedTriangleBarycentrics();
+    }
+    return h;
+}
+
+// True when anything blocks the ray before 'tmax'
+bool occluded(float3 o, float3 d, float tmin, float tmax)
+{
+    RayDesc ray;
+    ray.Origin = o;
+    ray.Direction = d;
+    ray.TMin = tmin;
+    ray.TMax = tmax;
+    RayQuery<RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH> q;
+    q.TraceRayInline(tlas, RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH, 0xFF, ray);
+    while (q.Proceed())
+    {
+        if (q.CandidateType() == CANDIDATE_PROCEDURAL_PRIMITIVE)
+        {
+            uint type = q.CandidateInstanceID();
+            uint prim = q.CandidatePrimitiveIndex();
+            float t;
+            bool hit;
+            if (type == 0u)
+                hit = hitSphere(prim, o, d, tmin, tmax, t);
+            else
+            {
+                float3 n;
+                float sel;
+                hit = hitCylinder(prim, o, d, tmin, tmax, t, n, sel);
+            }
+            if (hit)
+                q.CommitProceduralPrimitiveHit(t);
+        }
+    }
+    return q.CommittedStatus() != COMMITTED_NOTHING;
+}
+
+// Samplers ///////////////////////////////////////////////////////////////////
+
+float4 mulMat(float4 c0, float4 c1, float4 c2, float4 c3, float4 v)
+{
+    return c0 * v.x + c1 * v.y + c2 * v.z + c3 * v.w;
+}
+
+// wrap an integer texel index like helium::math::calculateWrapIndex
+int wrapIndex(int i, uint size, uint mode)
+{
+    int n = int(size);
+    if (mode == 1u)
+    {
+        // C++ evaluates i % size with size_t: a negative i is first converted
+        // to a huge unsigned number
+        if (i >= 0)
+            return i % n;
+        uint a = (0xFFFFFFFFu % size + 1u) % size; // 2^32 mod size
+        uint r64 = (a * a) % size; // 2^64 mod size
+        uint k = uint(-i) % size;
+        return int((r64 + size - k) % size);
+    }
+    if (mode == 2u)
+    {
+        int x = i + (i < 0 ? 1 : 0);
+        x = abs(x) % (2 * n);
+        return x >= n ? 2 * n - x - 1 : x;
+    }
+    return clamp(i, 0, n - 1);
+}
+
+float4 texel(uint base, uint3 dims, int3 i, uint3 wrap)
+{
+    int x = wrapIndex(i.x, dims.x, wrap.x);
+    int y = wrapIndex(i.y, dims.y, wrap.y);
+    int z = wrapIndex(i.z, dims.z, wrap.z);
+    return texels[base + (uint(z) * dims.y + uint(y)) * dims.x + uint(x)];
+}
+
+float4 evalSampler(uint sid, float4 attr)
+{
+    uint b = 13u * sid;
+    uint4 hdr0 = asuint(samplerTable[b + 0]); // type, dims
+    float4 hdr1 = samplerTable[b + 1]; // wraps, linear
+    uint4 hdr2 = asuint(samplerTable[b + 2]); // texel base
+    float4 outv;
+    if (hdr0.x == 0u)
+    {
+        outv = attr;
+    }
+    else
+    {
+        float4 co = mulMat(samplerTable[b + 3], samplerTable[b + 4],
+                           samplerTable[b + 5], samplerTable[b + 6], attr)
+                    + samplerTable[b + 7];
+        uint3 dims = uint3(hdr0.y, hdr0.z, hdr0.w);
+        uint3 wrap = uint3(asuint(hdr1.x), asuint(hdr1.y), asuint(hdr1.z));
+        bool linearFilter = asuint(hdr1.w) != 0u;
+        uint dimCount = hdr0.x; // 1, 2 or 3
+        float cc[3] = { co.x, co.y, co.z };
+        int lo[3] = { 0, 0, 0 };
+        int hi[3] = { 0, 0, 0 };
+        float fr[3] = { 0, 0, 0 };
+        for (uint a = 0; a < 3; a++)
+        {
+            if (a >= dimCount)
+                continue;
+            float c = cc[a];
+            if (wrap[a] == 1u)
+                c = c - floor(c);
+            float scale = float(dims[a]);
+            float lowf = (c - (0.5 / scale)) * scale;
+            float fl = floor(lowf);
+            lo[a] = int(fl);
+            hi[a] = lo[a] + 1;
+            fr[a] = lowf - fl;
+        }
+        uint tb = hdr2.x;
+        if (!linearFilter)
+        {
+            int3 pick = int3(fr[0] < 0.5 ? lo[0] : hi[0],
+                             fr[1] < 0.5 ? lo[1] : hi[1],
+                             fr[2] < 0.5 ? lo[2] : hi[2]);
+            outv = texel(tb, dims, pick, wrap);
+        }
+        else
+        {
+            float4 acc = float4(0, 0, 0, 0);
+            for (uint cz = 0; cz < (dimCount > 2u ? 2u : 1u); cz++)
+            for (uint cy = 0; cy < (dimCount > 1u ? 2u : 1u); cy++)
+            for (uint cx = 0; cx < 2u; cx++)
+            {
+                float wgt = (cx == 0u ? 1.0 - fr[0] : fr[0])
+                          * (dimCount > 1u ? (cy == 0u ? 1.0 - fr[1] : fr[1]) : 1.0)
+                          * (dimCount > 2u ? (cz == 0u ? 1.0 - fr[2] : fr[2]) : 1.0);
+                int3 idx = int3(cx == 0u ? lo[0] : hi[0],
+                                cy == 0u ? lo[1] : hi[1],
+                                cz == 0u ? lo[2] : hi[2]);
+                acc += wgt * texel(tb, dims, idx, wrap);
+            }
+            outv = acc;
+        }
+    }
+    // output transform and offset
+    return mulMat(samplerTable[b + 8], samplerTable[b + 9],
+                  samplerTable[b + 10], samplerTable[b + 11], outv)
+           + samplerTable[b + 12];
+}
+
+uint primStyle(Hit h)
+{
+    if (h.type == 0u)
+        return (fd.flags.x & F_SPHERE_STYLES) != 0u ? sphereStyles[h.prim] : fd.styles.x;
+    if (h.type == 1u)
+        return (fd.flags.x & F_CYL_STYLES) != 0u ? cylStyles[h.prim] : fd.styles.y;
+    return asuint(triShade[12u * h.prim + 9u]);
+}
+
+// Light left after the shadow ray: opaque surfaces (opacity >= 0.99999) block
+// it, transparent ones scale it by (1 - opacity), like Tachyon's shadow
+// filtering.
+float shadowFilter(float3 o, float3 d, float tmin, float tmax)
+{
+    if ((fd.flags.x & F_TRANSPARENT) == 0u)
+        return occluded(o, d, tmin, tmax) ? 0.0 : 1.0;
+    float f = 1.0;
+    for (uint k = 0; k < 16u; k++)
+    {
+        Hit h = closestHit(o, d, tmin, tmax);
+        if (!h.valid)
+            break;
+        float opacity = styleTable[2u * primStyle(h)].w;
+        if (opacity >= 0.99999)
+            return 0.0;
+        f *= (1.0 - opacity);
+        tmin = h.t + 1e-5 * max(1.0, h.t);
+    }
+    return f;
+}
+
+// Shading ///////////////////////////////////////////////////////////////////
+
+struct Surface
+{
+    float3 p; // hit point
+    float3 n; // normal facing the viewer
+    float3 color;
+    uint style;
+};
+
+float3 vec3At(StructuredBuffer<float> buf, uint i)
+{
+    return float3(buf[i], buf[i + 1], buf[i + 2]);
+}
+
+Surface fetchSurface(Hit h, float3 o, float3 d)
+{
+    Surface s;
+    s.p = o + h.t * d;
+    s.n = float3(0, 0, 1);
+    s.color = float3(0, 0, 0);
+    s.style = 0u;
+    bool ownColor = false;
+    if (h.type == 0u)
+    {
+        float4 sp = spheres[h.prim];
+        s.n = (s.p - sp.xyz) / sp.w;
+        ownColor = (fd.flags.x & F_SPHERE_COLORS) != 0u;
+        if (ownColor)
+            s.color = vec3At(sphereColors, 3u * h.prim);
+        s.style = (fd.flags.x & F_SPHERE_STYLES) != 0u ? sphereStyles[h.prim] : fd.styles.x;
+    }
+    else if (h.type == 1u)
+    {
+        float t;
+        float3 n;
+        float sel;
+        hitCylinder(h.prim, o, d, 0.0, h.t * 1.0001 + 1e-6, t, n, sel);
+        s.n = n;
+        ownColor = (fd.flags.x & F_CYL_COLORS) != 0u;
+        if (ownColor)
+            s.color = sel < 0.5 ? vec3At(cylColors, 6u * h.prim)
+                                : vec3At(cylColors, 6u * h.prim + 3u);
+        s.style = (fd.flags.x & F_CYL_STYLES) != 0u ? cylStyles[h.prim] : fd.styles.y;
+    }
+    else
+    {
+        uint tb = 9u * h.prim;
+        float3 v0 = vec3At(triPos, tb);
+        float3 v1 = vec3At(triPos, tb + 3u);
+        float3 v2 = vec3At(triPos, tb + 6u);
+        uint sb = 12u * h.prim;
+        float3 n0 = vec3At(triShade, sb);
+        float3 n1 = vec3At(triShade, sb + 3u);
+        float3 n2 = vec3At(triShade, sb + 6u);
+        s.style = asuint(triShade[sb + 9u]);
+        uint flags = asuint(triShade[sb + 10u]);
+        uint aux = asuint(triShade[sb + 11u]);
+        float w1 = h.bary.x;
+        float w2 = h.bary.y;
+        float w0 = 1.0 - w1 - w2;
+        float3 ng = cross(v1 - v0, v2 - v0);
+        float3 nn = normalize(w0 * n0 + w1 * n1 + w2 * n2);
+        s.n = dot(ng, d) > 0.0 ? -nn : nn;
+        s.p = w0 * v0 + w1 * v1 + w2 * v2;
+        s.p = o + h.t * d; // the ray point matches the CPU backend
+        ownColor = (flags & 3u) != 0u;
+        if ((flags & 1u) != 0u)
+        {
+            s.color = w0 * vec3At(triAux, aux) + w1 * vec3At(triAux, aux + 3u)
+                      + w2 * vec3At(triAux, aux + 6u);
+        }
+        else if ((flags & 2u) != 0u)
+        {
+            float4 a0 = float4(triAux[aux], triAux[aux + 1], triAux[aux + 2], triAux[aux + 3]);
+            float4 a1 = float4(triAux[aux + 4], triAux[aux + 5], triAux[aux + 6], triAux[aux + 7]);
+            float4 a2 = float4(triAux[aux + 8], triAux[aux + 9], triAux[aux + 10], triAux[aux + 11]);
+            float4 a = w0 * a0 + w1 * a1 + w2 * a2;
+            s.color = evalSampler(flags >> 8, a).xyz;
+        }
+    }
+    if (!ownColor)
+        s.color = styleTable[2u * s.style].xyz;
+    if (dot(s.n, d) > 0.0)
+        s.n = -s.n;
+    return s;
+}
+
+float3 shadeSurface(Hit h, Surface s, float3 d, out float alpha)
+{
+    float4 st0 = styleTable[2u * s.style];
+    float4 st1 = styleTable[2u * s.style + 1u];
+    alpha = st0.w;
+    float3 col = s.color;
+    float diffuseW = st1.x * fd.shade.y;
+    float phong = st1.y;
+    float phongExp = st1.z;
+    bool metal = st1.w > 0.5;
+
+    float3 diffuse = float3(0, 0, 0);
+    float3 phongcol = float3(0, 0, 0);
+    if (diffuseW > MINCONTRIB || phong > MINCONTRIB)
+    {
+        float biasScale = 1e-5 * max(1.0, max(abs(s.p.x), max(abs(s.p.y), abs(s.p.z))));
+        float3 shadowO = s.p + s.n * biasScale;
+        for (uint i = 0; i < fd.counts.w; i++)
+        {
+            float4 l0 = lights[2u * i];
+            float3 lcol = lights[2u * i + 1u].xyz;
+            float3 L;
+            float Llen = 1e30;
+            float atten = 1.0;
+            if (l0.w < 0.5)
+            {
+                L = l0.xyz;
+            }
+            else
+            {
+                float3 lv = l0.xyz - s.p;
+                float len = sqrt(dot(lv, lv)) + 1e-6;
+                L = lv / len;
+                Llen = len;
+                atten = 1.0 / (Llen * Llen);
+            }
+            float inten = dot(s.n, L) * atten;
+            if (inten > MINCONTRIB)
+            {
+                if ((fd.flags.x & F_SHADOWS) != 0u)
+                {
+                    float tmax = Llen >= 1e29 ? 1e30 : Llen - biasScale;
+                    float filt = shadowFilter(shadowO, L, 0.0, tmax);
+                    if (filt <= 0.0)
+                        continue;
+                    inten *= filt;
+                }
+                diffuse += lcol * inten;
+                if (phong > MINCONTRIB)
+                {
+                    float3 H = L - d;
+                    float ndh = dot(s.n, H);
+                    float pv = 0.0;
+                    if (ndh > MINCONTRIB)
+                    {
+                        ndh /= sqrt(dot(H, H));
+                        pv = pow(ndh, phongExp);
+                    }
+                    phongcol += (metal ? col : lcol) * (pv * phong);
+                }
+            }
+        }
+    }
+    diffuse *= diffuseW;
+    float3 outc = col * (diffuse + fd.shade.x);
+    if (phong > MINCONTRIB)
+        outc += phongcol;
+    return outc;
+}
+
+float3 radiance(float3 o, float3 d, bool recordDepth, out float depthOut)
+{
+    float3 result = float3(0, 0, 0);
+    float w = 1.0;
+    depthOut = 1e18;
+    uint depthLeft = fd.flags.z;
+    float tmin = 0.0;
+    for (uint k = 0; k < 8u; k++)
+    {
+        Hit h = closestHit(o, d, tmin, 1e30);
+        if (!h.valid)
+        {
+            result += w * fd.bg.xyz;
+            break;
+        }
+        if (k == 0u)
+            depthOut = h.t;
+        Surface s = fetchSurface(h, o, d);
+        float alpha;
+        float3 c = shadeSurface(h, s, d, alpha);
+        result += w * c;
+        if (alpha < 1.0 - MINCONTRIB)
+        {
+            if (depthLeft <= 1u)
+            {
+                result += w * fd.bg.xyz;
+                break;
+            }
+            w *= (1.0 - alpha);
+            depthLeft--;
+            float eps = 1e-5 * max(1.0, max(abs(s.p.x), max(abs(s.p.y), abs(s.p.z))));
+            o = s.p;
+            tmin = eps;
+        }
+        else
+            break;
+    }
+    return result;
+}
+
+// Frame ////////////////////////////////////////////////////////////////////
+
+uint pcg(uint v)
+{
+    uint state = v * 747796405u + 2891336453u;
+    uint word = ((state >> ((state >> 28u) + 4u)) ^ state) * 277803737u;
+    return (word >> 22u) ^ word;
+}
+
+float2 jitter(uint pixel, uint sampleIndex)
+{
+    uint h = pcg(pixel ^ pcg(sampleIndex * 0x9E3779B9u + 0x7F4A7C15u));
+    uint h2 = pcg(h + 0x68E31DA4u);
+    return float2(float(h >> 8) * (1.0 / 16777216.0) - 0.5,
+                  float(h2 >> 8) * (1.0 / 16777216.0) - 0.5);
+}
+
+float toSrgb8(float v)
+{
+    v = clamp(v, 0.0, 1.0);
+    v = pow(v, 1.0 / 2.2);
+    return float(uint(255.0 * clamp(v, 0.0, 1.0)));
 }
 
 [shader("compute")]
 [numthreads(8, 8, 1)]
 void main(uint3 tid : SV_DispatchThreadID)
 {
-    if (tid.x >= pc.size.x || tid.y >= pc.size.y)
+    uint W = fd.size.x;
+    uint H = fd.size.y;
+    if (tid.x >= W || tid.y >= H)
         return;
+    uint pixel = tid.y * W + tid.x;
+    float3 fwd = fd.fwdU0.xyz;
 
-    float u = pc.fwdU0.w + pc.rightDu.w * (float(tid.x) + 0.5);
-    float v = pc.upV0.w + pc.shade.z * (float(tid.y) + 0.5);
-    float3 fwd = pc.fwdU0.xyz;
-    float3 plane = pc.rightDu.xyz * u + pc.upV0.xyz * v;
-
-    RayDesc ray;
-    if (pc.posOrtho.w > 0.5)
+    float3 sum = float3(0, 0, 0);
+    float depth0 = 1e18;
+    for (uint s = 0; s < fd.size.z; s++)
     {
-        ray.Origin = pc.posOrtho.xyz + plane;
-        ray.Direction = fwd;
-    }
-    else
-    {
-        ray.Origin = pc.posOrtho.xyz;
-        ray.Direction = normalize(fwd + plane);
-    }
-    ray.TMin = 0.0;
-    ray.TMax = 1e30;
-
-    float best = ray.TMax;
-    RayQuery<RAY_FLAG_NONE> q;
-    q.TraceRayInline(tlas, RAY_FLAG_NONE, 0xFF, ray);
-    while (q.Proceed())
-    {
-        if (q.CandidateType() == CANDIDATE_PROCEDURAL_PRIMITIVE)
+        uint g = fd.size.w + s; // global sample index
+        float2 j = g == 0u ? float2(0, 0) : jitter(pixel, g);
+        float u = fd.fwdU0.w + fd.rightDu.w * (float(tid.x) + 0.5 + j.x);
+        float v = fd.upV0.w + fd.shade.z * (float(tid.y) + 0.5 + j.y);
+        float3 plane = fd.rightDu.xyz * u + fd.upV0.xyz * v;
+        float3 o;
+        float3 d;
+        if (fd.posOrtho.w > 0.5)
         {
-            float4 s = spheres[q.CandidatePrimitiveIndex()];
-            float3 oc = ray.Origin - s.xyz;
-            float b = dot(oc, ray.Direction);
-            float3 h = oc - b * ray.Direction; // closest approach: stable
-            float disc = s.w * s.w - dot(h, h);
-            if (disc >= 0.0)
-            {
-                float sq = sqrt(disc);
-                float t = -b - sq;
-                if (t <= 0.0)
-                    t = -b + sq;
-                if (t > 0.0 && t < best)
-                {
-                    best = t;
-                    q.CommitProceduralPrimitiveHit(t);
-                }
-            }
+            o = fd.posOrtho.xyz + plane;
+            d = fwd;
         }
+        else
+        {
+            o = fd.posOrtho.xyz;
+            d = normalize(fwd + plane);
+        }
+        float dep;
+        sum += radiance(o, d, g == 0u, dep);
+        if (g == 0u)
+            depth0 = dep;
     }
 
-    float3 rgb = pc.bg.xyz;
-    float depth = 1e18;
-    if (q.CommittedStatus() == COMMITTED_PROCEDURAL_PRIMITIVE_HIT)
+    uint total = fd.size.w + fd.size.z; // samples in the average
+    if ((fd.flags.x & F_ACCUM) != 0u)
     {
-        uint prim = q.CommittedPrimitiveIndex();
-        float4 s = spheres[prim];
-        float3 p = ray.Origin + best * ray.Direction;
-        float3 n = (p - s.xyz) / s.w;
-        // like the CPU backend: the headlight shines along the camera
-        // direction (not per ray), the normal faces the viewer
-        if (dot(n, ray.Direction) > 0.0)
-            n = -n;
-        float ndl = max(dot(n, -fwd), 0.0);
-        float3 col = pc.baseColor.xyz;
-        if (pc.flags.x != 0u)
-            col = float3(colors[3 * prim], colors[3 * prim + 1], colors[3 * prim + 2]);
-        rgb = col * (pc.shade.x + pc.shade.y * ndl);
-        depth = best;
+        if ((fd.flags.x & F_ACCUM_READ) != 0u)
+            sum += float3(accum[3 * pixel], accum[3 * pixel + 1], accum[3 * pixel + 2]);
+        accum[3 * pixel + 0] = sum.x;
+        accum[3 * pixel + 1] = sum.y;
+        accum[3 * pixel + 2] = sum.z;
     }
+    float3 rgb = sum / float(total);
 
-    uint idx = tid.y * pc.size.x + tid.x;
-    outRgb[3 * idx + 0] = rgb.x;
-    outRgb[3 * idx + 1] = rgb.y;
-    outRgb[3 * idx + 2] = rgb.z;
-    if (pc.flags.y != 0u)
-        outDepth[idx] = depth;
+    // Output in the frame's pixel format, ANARI row order (bottom row first)
+    uint row = H - 1u - tid.y;
+    uint dst = row * W + tid.x;
+    float alpha = 1.0;
+    if ((fd.flags.x & F_BG_ALPHA) != 0u && all(rgb == fd.bg.xyz))
+        alpha = fd.bg.w;
+    uint fmt = fd.flags.y;
+    if (fmt == FMT_F32)
+    {
+        float3 c = min(rgb, float3(1, 1, 1));
+        outPixels[4 * dst + 0] = asuint(c.x);
+        outPixels[4 * dst + 1] = asuint(c.y);
+        outPixels[4 * dst + 2] = asuint(c.z);
+        outPixels[4 * dst + 3] = asuint(alpha);
+    }
+    else if (fmt == FMT_U8 || fmt == FMT_U8_SRGB)
+    {
+        float3 c = min(rgb, float3(1, 1, 1));
+        uint r, g, b;
+        if (fmt == FMT_U8)
+        {
+            r = uint(255.0 * clamp(c.x, 0.0, 1.0));
+            g = uint(255.0 * clamp(c.y, 0.0, 1.0));
+            b = uint(255.0 * clamp(c.z, 0.0, 1.0));
+        }
+        else
+        {
+            r = uint(toSrgb8(c.x));
+            g = uint(toSrgb8(c.y));
+            b = uint(toSrgb8(c.z));
+        }
+        uint a = uint(255.0 * clamp(alpha, 0.0, 1.0));
+        outPixels[dst] = r | (g << 8) | (b << 16) | (a << 24);
+    }
+    if ((fd.flags.x & F_DEPTH) != 0u && fd.size.w == 0u)
+        outDepth[dst] = depth0 >= 1e17 ? asfloat(0x7F800000u) : depth0;
 }

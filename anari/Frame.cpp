@@ -363,10 +363,9 @@ void Frame::rebuildScene(helium::TimeStamp sceneStamp)
   m_scene->finishBuild();
 
   if (m_backendGpu && deviceState()->backend == "auto"
-      && (m_scene->numTriangles() || m_scene->numCylinders() || m_lit))
+      && m_scene->hasUnsupportedContent())
     throw UnsuitableScene(
-        "the scene has triangles, cylinders or lights, which the GPU backend "
-        "does not support yet");
+        "the scene has content the GPU backend cannot render yet");
 
   m_builtStamp = sceneStamp;
   m_builtWorld = m_world.ptr;
@@ -479,10 +478,30 @@ void Frame::renderScene(helium::TimeStamp sceneStamp)
   m_scene->setBackground(&bg.x);
   m_scene->setSamples(m_renderer->pixelSamples());
 
+  OutputFormat format = OutputFormat::None;
+  switch (m_colorType) {
+  case ANARI_UFIXED8_VEC4:
+    format = OutputFormat::UFixed8;
+    break;
+  case ANARI_UFIXED8_RGBA_SRGB:
+    format = OutputFormat::UFixed8Srgb;
+    break;
+  case ANARI_FLOAT32_VEC4:
+    format = OutputFormat::Float32;
+    break;
+  default:
+    break;
+  }
+  const bool direct = m_scene->setDirectOutput(format,
+      m_pixelBuffer.empty() ? nullptr : m_pixelBuffer.data(),
+      m_depthBuffer.empty() ? nullptr : m_depthBuffer.data(),
+      bg.w);
+
   m_scene->render();
   for (const std::string &w : m_scene->takeWarnings())
     reportMessage(ANARI_SEVERITY_WARNING, "tachyon: %s", w.c_str());
-  writePixels();
+  if (!direct)
+    writePixels();
 }
 
 void Frame::writePixels()

@@ -161,7 +161,8 @@ void TachyonScene::addSampledTriangle(int style,
     const float *n,
     const float *vertexAttr,
     AttrSampleFn fn,
-    const void *user)
+    const void *user,
+    const SamplerDesc *)
 {
   Style &st = m_styles[style];
   m_numTriangles++;

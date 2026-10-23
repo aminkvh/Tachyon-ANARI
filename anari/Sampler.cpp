@@ -81,6 +81,108 @@ float4 ImageSampler::sample(const float4 &in) const
   return linalg::mul(m_outTransform, lookup(coord)) + m_outOffset;
 }
 
+static int wrapToInt(WrapMode m)
+{
+  return m == WrapMode::REPEAT ? 1 : (m == WrapMode::MIRROR_REPEAT ? 2 : 0);
+}
+
+static void copyMat(const mat4 &m, float *out)
+{
+  for (int c = 0; c < 4; c++) {
+    out[4 * c + 0] = m[c].x;
+    out[4 * c + 1] = m[c].y;
+    out[4 * c + 2] = m[c].z;
+    out[4 * c + 3] = m[c].w;
+  }
+}
+
+static void copyVec(const float4 &v, float *out)
+{
+  out[0] = v.x;
+  out[1] = v.y;
+  out[2] = v.z;
+  out[3] = v.w;
+}
+
+void ImageSampler::describeCommon(SamplerDesc &d) const
+{
+  d.linear = m_linear;
+  for (int i = 0; i < 3; i++)
+    d.wrap[i] = wrapToInt(m_wrap[i]);
+  copyMat(m_inTransform, d.inTransform);
+  copyVec(m_inOffset, d.inOffset);
+  copyMat(m_outTransform, d.outTransform);
+  copyVec(m_outOffset, d.outOffset);
+}
+
+static void pushTexel(SamplerDesc &d, const float4 &v)
+{
+  d.texels.push_back(v.x);
+  d.texels.push_back(v.y);
+  d.texels.push_back(v.z);
+  d.texels.push_back(v.w);
+}
+
+bool Image1D::describe(SamplerDesc &d) const
+{
+  if (!m_valid || !m_image)
+    return false;
+  describeCommon(d);
+  d.dims = 1;
+  d.size[0] = int(m_image->size());
+  for (int i = 0; i < d.size[0]; i++)
+    pushTexel(d, m_image->readAsAttributeValue(i, WrapMode::CLAMP_TO_EDGE));
+  return true;
+}
+
+bool Image2D::describe(SamplerDesc &d) const
+{
+  if (!m_valid || !m_image)
+    return false;
+  describeCommon(d);
+  const uint2 sz = m_image->size();
+  d.dims = 2;
+  d.size[0] = int(sz.x);
+  d.size[1] = int(sz.y);
+  for (int y = 0; y < d.size[1]; y++)
+    for (int x = 0; x < d.size[0]; x++)
+      pushTexel(d,
+          m_image->readAsAttributeValue(
+              {x, y}, WrapMode::CLAMP_TO_EDGE, WrapMode::CLAMP_TO_EDGE));
+  return true;
+}
+
+bool Image3D::describe(SamplerDesc &d) const
+{
+  if (!m_valid || !m_image)
+    return false;
+  describeCommon(d);
+  const uint3 sz = m_image->size();
+  d.dims = 3;
+  d.size[0] = int(sz.x);
+  d.size[1] = int(sz.y);
+  d.size[2] = int(sz.z);
+  for (int z = 0; z < d.size[2]; z++)
+    for (int y = 0; y < d.size[1]; y++)
+      for (int x = 0; x < d.size[0]; x++)
+        pushTexel(d,
+            m_image->readAsAttributeValue({x, y, z},
+                WrapMode::CLAMP_TO_EDGE,
+                WrapMode::CLAMP_TO_EDGE,
+                WrapMode::CLAMP_TO_EDGE));
+  return true;
+}
+
+bool TransformSampler::describe(SamplerDesc &d) const
+{
+  if (!m_valid)
+    return false;
+  d.dims = 0;
+  copyMat(m_outTransform, d.outTransform);
+  copyVec(m_outOffset, d.outOffset);
+  return true;
+}
+
 // Coordinate along one axis: 'repeat' wraps with fract() before the
 // interpolation weights are computed (the neighbor index is wrapped when the
 // texel is fetched)

@@ -58,6 +58,12 @@ std::shared_ptr<VulkanContext> VulkanContext::acquire(
     return nullptr;
   }
   g_context = ctx;
+  // Keep the context for the lifetime of the process: creating the Vulkan
+  // instance and device takes 0.5-2 s, which applications that create
+  // several ANARI devices would pay every time. It is deliberately never
+  // destroyed (no device teardown while the process unloads the driver).
+  static auto *keepAlive = new std::shared_ptr<VulkanContext>(ctx);
+  (void)keepAlive;
   return ctx;
 }
 

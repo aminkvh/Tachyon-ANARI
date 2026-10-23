@@ -34,7 +34,8 @@ class TachyonScene : public SceneBackend
       const float *n,
       const float *vertexAttr,
       AttrSampleFn fn,
-      const void *user) override;
+      const void *user,
+      const SamplerDesc *desc) override;
   // Spheres and cylinders are allocated from the scene's bulk arena (no
   // per-object malloc). Textures are shared between all objects of a style
   // that use the same color, so only the number of distinct colors costs

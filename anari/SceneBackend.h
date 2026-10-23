@@ -37,6 +37,32 @@ struct SceneCamera
   float region[4]{0.f, 0.f, 1.f, 1.f}; // imageRegion x0,y0,x1,y1 (y up)
 };
 
+// What a GPU backend needs to evaluate an ANARI sampler in a shader (the CPU
+// backend uses the AttrSampleFn callback instead). Matrices are column major
+// (column c is m[4 * c .. 4 * c + 3]); the sampler's result is
+//   outTransform * lookup(inTransform * attr + inOffset) + outOffset
+// where 'dims' == 0 means there is no lookup (transform sampler).
+struct SamplerDesc
+{
+  int dims{0}; // 0: transform only, 1, 2, 3: image dimensionality
+  int size[3]{1, 1, 1};
+  int wrap[3]{0, 0, 0}; // 0 clamp to edge, 1 repeat, 2 mirrored repeat
+  bool linear{true};
+  float inTransform[16]{1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
+  float inOffset[4]{0, 0, 0, 0};
+  float outTransform[16]{1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
+  float outOffset[4]{0, 0, 0, 0};
+  std::vector<float> texels; // RGBA float per texel, x fastest
+};
+
+enum class OutputFormat
+{
+  None,
+  UFixed8, // 4 x uint8, linear
+  UFixed8Srgb, // 4 x uint8, sRGB encoded
+  Float32 // 4 x float
+};
+
 class SceneBackend
 {
  public:
@@ -61,7 +87,8 @@ class SceneBackend
       const float *n,
       const float *vertexAttr,
       AttrSampleFn fn,
-      const void *user) = 0;
+      const void *user,
+      const SamplerDesc *desc) = 0;
   // 'rgb' (3 floats, may be nullptr) overrides the style color.
   virtual void addSphere(
       int style, const float *center, float radius, const float *rgb) = 0;
@@ -99,6 +126,27 @@ class SceneBackend
   // Optional per-pixel primary hit distance (same layout as the image, 1e18
   // for misses); nullptr disables it.
   virtual void setDepthOutput(float *depthBuffer) = 0;
+
+  // GPU backends can write the final frame buffers themselves (ANARI row
+  // order, bottom row first, in the frame's pixel format). Returns false when
+  // unsupported: the caller then uses setOutput()/setDepthOutput() and
+  // converts. 'color' (may be nullptr) gets 4 components per pixel, 'depth'
+  // (may be nullptr) the primary hit distance (+inf for misses); 'bgAlpha' is
+  // the alpha of pixels that show the background.
+  virtual bool setDirectOutput(OutputFormat format,
+      void *color,
+      float *depth,
+      float bgAlpha)
+  {
+    (void)format;
+    (void)color;
+    (void)depth;
+    (void)bgAlpha;
+    return false;
+  }
+  // True when the scene contains something this backend cannot render (the
+  // caller may then switch to another backend).
+  virtual bool hasUnsupportedContent() const { return false; }
 
   // Renders into the buffer given to setOutput(), 3 floats per pixel. Rows are
   // stored top row first.

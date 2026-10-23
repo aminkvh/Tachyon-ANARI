@@ -231,6 +231,9 @@ void Triangle::emit(SceneBackend &scene,
   const Sampler *valueSampler = (colorSampler && !primSampler && !vattr)
       ? colorSampler
       : nullptr; // maps constant per-primitive values
+  // what a GPU backend needs to evaluate the sampler per hit
+  SamplerDesc samplerDesc;
+  const bool haveDesc = hitSampled && colorSampler->describe(samplerDesc);
   const bool vcol = vattr != nullptr && !hitSampled;
   const bool pcol = pattr != nullptr || primSampler;
 
@@ -289,7 +292,8 @@ void Triangle::emit(SceneBackend &scene,
           nrm ? n : nullptr,
           a,
           Sampler::sampleCallback,
-          colorSampler);
+          colorSampler,
+          haveDesc ? &samplerDesc : nullptr);
       continue;
     }
     scene.addTriangle(

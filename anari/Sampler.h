@@ -4,6 +4,7 @@
 #pragma once
 
 #include "Object.h"
+#include "SceneBackend.h"
 #include "helium/array/Array2D.h"
 #include "helium/array/Array3D.h"
 
@@ -37,6 +38,11 @@ struct Sampler : public Object
     return helium::math::DEFAULT_ATTRIBUTE_VALUE;
   }
 
+  // Fills 'd' with what a shader needs to evaluate this sampler on an input
+  // attribute value; false when that is not possible (primitive samplers are
+  // evaluated per primitive on the CPU).
+  virtual bool describe(SamplerDesc &) const { return false; }
+
   // Callback for Tachyon's per-hit texture function (TachyonScene's
   // AttrSampleFn): 'user' is the Sampler, 'attr' the 4 component input value.
   static void sampleCallback(const void *user, const float *attr, float *rgb);
@@ -60,6 +66,7 @@ struct ImageSampler : public Sampler
   float4 sample(const float4 &in) const override;
 
  protected:
+  void describeCommon(SamplerDesc &d) const;
   void commitCommon(const char *const *wrapNames, int numWrap);
   // Lookup at the (transformed) texture coordinate
   virtual float4 lookup(const float4 &coord) const = 0;
@@ -79,6 +86,7 @@ struct Image1D : public ImageSampler
   Image1D(TachyonGlobalState *s);
   void commitParameters() override;
   void finalize() override;
+  bool describe(SamplerDesc &d) const override;
 
  private:
   float4 lookup(const float4 &coord) const override;
@@ -90,6 +98,7 @@ struct Image2D : public ImageSampler
   Image2D(TachyonGlobalState *s);
   void commitParameters() override;
   void finalize() override;
+  bool describe(SamplerDesc &d) const override;
 
  private:
   float4 lookup(const float4 &coord) const override;
@@ -101,6 +110,7 @@ struct Image3D : public ImageSampler
   Image3D(TachyonGlobalState *s);
   void commitParameters() override;
   void finalize() override;
+  bool describe(SamplerDesc &d) const override;
 
  private:
   float4 lookup(const float4 &coord) const override;
@@ -113,6 +123,7 @@ struct TransformSampler : public Sampler
   TransformSampler(TachyonGlobalState *s) : Sampler(s) {}
   void commitParameters() override;
   float4 sample(const float4 &in) const override;
+  bool describe(SamplerDesc &d) const override;
 
  private:
   mat4 m_outTransform{linalg::identity};
