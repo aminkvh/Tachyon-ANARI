@@ -480,6 +480,7 @@ jobs:
           Fork of John Stone's Tachyon 0.99b6, now also available as a Khronos ANARI rendering device.
 
           New in this release:
+          - ANARI device: GPU ray tracing. Device parameter `backend` = auto|cpu|vulkan|metal. Vulkan (Windows/Linux, NVIDIA RTX, AMD RDNA2+, Intel Arc): a 1M-sphere frame at 1080p takes about 4 ms on an RTX 3060 laptop GPU versus about 110 ms on the CPU; animated trajectories update by refitting instead of rebuilding; same ANARI conformance results as the CPU backend (148 of 148 in eye-light mode against corrected references). Metal (macOS, Apple Silicon) is experimental and untested on real hardware. Without a ray-tracing GPU the CPU backend is used.
           - ANARI device: now advertises KHR_MATERIAL_PHYSICALLY_BASED (the extension name was misspelled, so it was never reported).
           - ANARI device: image1D/2D/3D, transform and primitive samplers (per-hit on triangles, per-primitive on spheres and cylinders); instance bounds now use the transformed group bounding box. In eye-light mode all 148 runnable ANARI CTS cases pass against a reference with two helide fixes (cylinder caps, sampler offsets); against stock helide references 140 pass, the 8 failures being those helide bugs.
           - ANARI device: images were offset by one pixel (pixels were sampled at their corner, not their center); fixed.
