@@ -21,7 +21,7 @@ jobs:
           - os: ubuntu-latest
             name: linux-x86_64
             exe: tachyon
-          - os: macos-latest
+          - os: macos-15
             name: macos-arm64
             exe: tachyon
           - os: windows-latest
@@ -66,7 +66,7 @@ jobs:
         include:
           - os: ubuntu-latest
             name: linux-x86_64
-          - os: macos-latest
+          - os: macos-15
             name: macos-arm64
           - os: windows-latest
             name: windows-x86_64
@@ -262,7 +262,7 @@ jobs:
           path: dist/tachyon-anari-${{ matrix.name }}.tar.gz
 
   shaders:
-    runs-on: macos-latest
+    runs-on: macos-15
     env:
       SLANG_VERSION: "2026.20"
     steps:
