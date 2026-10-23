@@ -121,7 +121,7 @@ struct MetalScene::Impl
   // (the GPU is idle: every submission is waited for)
   void putBuffer(int binding, const void *data, size_t bytes)
   {
-    id<MTLBuffer> &b = buf[binding];
+    __strong id<MTLBuffer> &b = buf[binding];
     if (!b || b.length != std::max<size_t>(bytes, 16))
       b = newBuffer(bytes);
     std::memcpy(b.contents, data, bytes);
@@ -265,8 +265,8 @@ MetalScene::~MetalScene() = default;
 
 void MetalScene::destroyScene()
 {
-  for (auto &b : m->buf)
-    b = nil;
+  for (int i = 0; i < NUM_BINDINGS; i++)
+    m->buf[i] = nil;
   m->aabbs[0] = m->aabbs[1] = nil;
   m->blas.clear();
   m->tlas = nil;
@@ -350,7 +350,7 @@ void MetalScene::buildSlices(const Gathered &g, bool updatable, bool refitOnly)
     if (!total)
       continue;
     const size_t bytes = 24 * size_t(total);
-    id<MTLBuffer> &boxes = m->aabbs[type];
+    __strong id<MTLBuffer> &boxes = m->aabbs[type];
     if (!boxes || boxes.length != bytes)
       boxes = m->newBuffer(bytes);
     fillAabbs(static_cast<float *>(boxes.contents),
