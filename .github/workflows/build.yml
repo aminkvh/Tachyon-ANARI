@@ -190,6 +190,18 @@ jobs:
           echo "PNG files written: $count"
           test "$count" -ge 1
 
+      - name: Library size with and without the Metal backend
+        if: runner.os == 'macOS'
+        run: |
+          cmake -S . -B build-nometal -G Ninja -DCMAKE_BUILD_TYPE=Release \
+            -DTACHYON_BUILD_ANARI=ON -DTACHYON_ANARI_METAL=OFF \
+            "-DCMAKE_PREFIX_PATH=$ANARI_PREFIX" > /dev/null
+          cmake --build build-nometal --parallel --target anari_library_tachyon > /dev/null
+          strip -x -o with.dylib build/anari/libanari_library_tachyon.dylib
+          strip -x -o without.dylib build-nometal/anari/libanari_library_tachyon.dylib
+          a=$(stat -f %z with.dylib); b=$(stat -f %z without.dylib)
+          echo "::notice::stripped library: $a bytes with Metal, $b without (+$(( (a - b) / 1024 )) KB)"
+
       - name: Metal backend falls back to the CPU (runner GPU has no ray tracing)
         if: runner.os == 'macOS'
         run: |
