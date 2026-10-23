@@ -257,6 +257,11 @@ jobs:
           if-no-files-found: warn
 
   vulkan-sw:
+    strategy:
+      fail-fast: false
+      matrix:
+        mesa: [archive, kisak]
+    name: vulkan-sw (${{ matrix.mesa }} Mesa)
     runs-on: ubuntu-24.04
     timeout-minutes: 90
     steps:
@@ -266,37 +271,28 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y mesa-vulkan-drivers libvulkan1 vulkan-tools ninja-build
-          echo "mesa-vulkan-drivers (Ubuntu archive): $(dpkg-query -W -f='${Version}' mesa-vulkan-drivers)"
+
+      - name: Upgrade Mesa from ppa:kisak/kisak-mesa
+        if: matrix.mesa == 'kisak'
+        run: |
+          sudo add-apt-repository -y ppa:kisak/kisak-mesa
+          sudo apt-get update
+          sudo apt-get install -y mesa-vulkan-drivers
 
       - name: Check lavapipe for VK_KHR_ray_query
         id: rt
         run: |
-          check_rt() {
-            vulkaninfo > vk-full.txt 2>&1 || true
-            grep -E "deviceName|driverName|driverInfo" vk-full.txt | head -n 6 || true
-            grep -E "VK_KHR_ray_query|VK_KHR_acceleration_structure" vk-full.txt || true
-            grep -q "VK_KHR_ray_query" vk-full.txt && grep -q "VK_KHR_acceleration_structure" vk-full.txt
-          }
-          find_icd() {
-            ls /usr/share/vulkan/icd.d/lvp_icd*.json 2>/dev/null | head -n 1 || true
-          }
-          icd=$(find_icd)
-          echo "lavapipe ICD (archive Mesa): ${icd:-none}"
+          echo "mesa-vulkan-drivers: $(dpkg-query -W -f='${Version}' mesa-vulkan-drivers)"
+          icd=$(ls /usr/share/vulkan/icd.d/lvp_icd*.json 2>/dev/null | head -n 1 || true)
+          echo "lavapipe ICD: ${icd:-none}"
           if [ -n "$icd" ]; then export VK_ICD_FILENAMES="$icd"; fi
+          vulkaninfo > vk-full.txt 2>&1 || true
+          grep -E "deviceName|driverInfo" vk-full.txt | head -n 4 || true
+          grep -E "VK_KHR_ray_query|VK_KHR_acceleration_structure" vk-full.txt || true
+          echo "--- lavapipe memory properties"
+          grep -n -E "memory(Types|Heaps)|propertyFlags|heapIndex|heapFlags" vk-full.txt | head -n 80 || true
           found=0
-          if check_rt; then found=1; fi
-          if [ "$found" = 0 ]; then
-            echo "::notice::archive Mesa has no VK_KHR_ray_query on lavapipe; trying ppa:kisak/kisak-mesa"
-            if sudo add-apt-repository -y ppa:kisak/kisak-mesa && sudo apt-get update && sudo apt-get install -y mesa-vulkan-drivers; then
-              echo "mesa-vulkan-drivers (kisak PPA): $(dpkg-query -W -f='${Version}' mesa-vulkan-drivers)"
-              icd=$(find_icd)
-              echo "lavapipe ICD (kisak Mesa): ${icd:-none}"
-              if [ -n "$icd" ]; then export VK_ICD_FILENAMES="$icd"; fi
-              if check_rt; then found=1; fi
-            else
-              echo "::warning::could not install mesa from ppa:kisak/kisak-mesa"
-            fi
-          fi
+          if grep -q "VK_KHR_ray_query" vk-full.txt && grep -q "VK_KHR_acceleration_structure" vk-full.txt; then found=1; fi
           vulkaninfo --summary || true
           if [ "$found" = 1 ]; then
             echo "lavapipe provides VK_KHR_ray_query and VK_KHR_acceleration_structure"
@@ -394,7 +390,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: vulkan-sw-render
+          name: vulkan-sw-${{ matrix.mesa }}-render
           path: render-out/
           if-no-files-found: ignore
 
