@@ -24,3 +24,6 @@ build/
 gmon.out
 graphify-out/
 t.dat
+
+# Local session handoff note
+.claude/HANDOFF.md
