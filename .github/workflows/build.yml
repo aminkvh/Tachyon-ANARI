@@ -256,6 +256,173 @@ jobs:
           path: shader-out/raytrace.metal
           if-no-files-found: warn
 
+  vulkan-sw:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Vulkan tools and Mesa lavapipe
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y mesa-vulkan-drivers libvulkan1 vulkan-tools ninja-build
+          echo "mesa-vulkan-drivers (Ubuntu archive): $(dpkg-query -W -f='${Version}' mesa-vulkan-drivers)"
+
+      - name: Check lavapipe for VK_KHR_ray_query
+        id: rt
+        run: |
+          check_rt() {
+            vulkaninfo > vk-full.txt 2>&1 || true
+            grep -E "deviceName|driverName|driverInfo" vk-full.txt | head -n 6 || true
+            grep -E "VK_KHR_ray_query|VK_KHR_acceleration_structure" vk-full.txt || true
+            grep -q "VK_KHR_ray_query" vk-full.txt && grep -q "VK_KHR_acceleration_structure" vk-full.txt
+          }
+          find_icd() {
+            ls /usr/share/vulkan/icd.d/lvp_icd*.json 2>/dev/null | head -n 1 || true
+          }
+          icd=$(find_icd)
+          echo "lavapipe ICD (archive Mesa): ${icd:-none}"
+          if [ -n "$icd" ]; then export VK_ICD_FILENAMES="$icd"; fi
+          found=0
+          if check_rt; then found=1; fi
+          if [ "$found" = 0 ]; then
+            echo "::notice::archive Mesa has no VK_KHR_ray_query on lavapipe; trying ppa:kisak/kisak-mesa"
+            if sudo add-apt-repository -y ppa:kisak/kisak-mesa && sudo apt-get update && sudo apt-get install -y mesa-vulkan-drivers; then
+              echo "mesa-vulkan-drivers (kisak PPA): $(dpkg-query -W -f='${Version}' mesa-vulkan-drivers)"
+              icd=$(find_icd)
+              echo "lavapipe ICD (kisak Mesa): ${icd:-none}"
+              if [ -n "$icd" ]; then export VK_ICD_FILENAMES="$icd"; fi
+              if check_rt; then found=1; fi
+            else
+              echo "::warning::could not install mesa from ppa:kisak/kisak-mesa"
+            fi
+          fi
+          vulkaninfo --summary || true
+          if [ "$found" = 1 ]; then
+            echo "lavapipe provides VK_KHR_ray_query and VK_KHR_acceleration_structure"
+            echo "VK_ICD_FILENAMES=$icd" >> "$GITHUB_ENV"
+          else
+            echo "::notice::no lavapipe with VK_KHR_ray_query found; skipping the Vulkan backend test"
+          fi
+          echo "available=$([ "$found" = 1 ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
+
+      - name: Resolve paths
+        if: steps.rt.outputs.available == 'true'
+        run: |
+          ROOT=$(cygpath -m "$PWD" 2>/dev/null || pwd)
+          echo "TACHYON_ROOT=$ROOT" >> "$GITHUB_ENV"
+          echo "ANARI_PREFIX=$ROOT/deps/anari-sdk/install" >> "$GITHUB_ENV"
+
+      - name: Restore ANARI-SDK cache
+        if: steps.rt.outputs.available == 'true'
+        id: sdk-cache
+        uses: actions/cache@v4
+        with:
+          path: deps/anari-sdk/install
+          key: anari-sdk-${{ env.ANARI_SDK_REF }}-ubuntu-24.04-v2
+
+      - name: Fetch ANARI-SDK source
+        if: steps.rt.outputs.available == 'true' && steps.sdk-cache.outputs.cache-hit != 'true'
+        uses: actions/checkout@v4
+        with:
+          repository: KhronosGroup/ANARI-SDK
+          ref: ${{ env.ANARI_SDK_REF }}
+          path: deps/anari-sdk/src
+          fetch-depth: 1
+
+      - name: Build and install ANARI-SDK
+        if: steps.rt.outputs.available == 'true' && steps.sdk-cache.outputs.cache-hit != 'true'
+        run: |
+          # SDK 0.16.0 bug: the palette variable lacks its export macro, so the
+          # CTS tools fail to link against the test-scenes DLL on Windows.
+          hdr=deps/anari-sdk/src/src/anari_test_scenes/generators/ColorPalette.h
+          sed -i.bak 's/^extern const std::vector<anari::math::float3> palette;/ANARI_TEST_SCENES_INTERFACE extern const std::vector<anari::math::float3> palette;/' "$hdr"
+          grep -q '^ANARI_TEST_SCENES_INTERFACE extern' "$hdr"
+          cmake -S deps/anari-sdk/src -B deps/anari-sdk/build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_INSTALL_PREFIX="$ANARI_PREFIX" \
+            -DBUILD_TESTING=ON \
+            -DBUILD_HELIDE_DEVICE=OFF \
+            -DBUILD_EXAMPLES=OFF \
+            -DBUILD_CTS=OFF \
+            -DBUILD_VIEWER=OFF
+          cmake --build deps/anari-sdk/build --parallel
+          cmake --install deps/anari-sdk/build
+
+      - name: Build tachyon ANARI device
+        if: steps.rt.outputs.available == 'true'
+        run: |
+          cmake -S . -B build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DTACHYON_BUILD_ANARI=ON \
+            "-DCMAKE_PREFIX_PATH=$ANARI_PREFIX"
+          cmake --build build --parallel
+
+      - name: Render test on lavapipe (Vulkan backend)
+        if: steps.rt.outputs.available == 'true'
+        run: |
+          sdk_bin="$(cd "$ANARI_PREFIX/bin" && pwd)"
+          sdk_lib="$(cd "$ANARI_PREFIX" && pwd)/lib"
+          dev_dir="$(cd build/anari && pwd)"
+          export PATH="$sdk_bin:$dev_dir:$PATH"
+          export LD_LIBRARY_PATH="$sdk_lib:$dev_dir${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+          export TACHYON_BACKEND=vulkan
+          export TACHYON_VULKAN_DEBUG=1
+          echo "VK_ICD_FILENAMES=$VK_ICD_FILENAMES"
+          mkdir -p render-out
+          cd render-out
+          start=$(date +%s)
+          status=0
+          anariRenderTests --library tachyon > render.log 2>&1 || status=$?
+          echo "anariRenderTests exit status $status after $(( $(date +%s) - start )) s"
+          cat render.log
+          vk=$(grep -c -F "[tachyon vulkan]" render.log || true)
+          cpu=$(grep -c -E "falling back to the CPU|Vulkan backend unavailable|not using the GPU backend" render.log || true)
+          count=$(find . -maxdepth 1 -name '*.png' | wc -l)
+          echo "Vulkan debug lines: $vk; CPU fallback messages: $cpu; PNG files written: $count"
+          if [ "$status" -ne 0 ]; then
+            echo "::error::anariRenderTests exited with status $status"
+            exit 1
+          fi
+          if [ "$vk" -eq 0 ] || [ "$cpu" -ne 0 ]; then
+            echo "::error::the Vulkan backend was not used (no Vulkan log lines, or CPU fallback)"
+            exit 1
+          fi
+          test "$count" -ge 1
+
+      - name: Upload lavapipe render output
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: vulkan-sw-render
+          path: render-out/
+          if-no-files-found: ignore
+
+  metal-probe:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, macos-15, macos-14]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Host and display info
+        run: |
+          echo "runner image: ${ImageOS:-unknown} ${ImageVersion:-unknown}"
+          sw_vers || true
+          echo "cpu: $(sysctl -n machdep.cpu.brand_string || echo unknown)"
+          system_profiler SPDisplaysDataType || true
+
+      - name: Metal capability probe
+        run: |
+          if ! swiftc -O .github/probe/metal_probe.swift -o metal_probe; then
+            echo "::warning::metal_probe.swift failed to compile"
+            exit 0
+          fi
+          ./metal_probe || echo "::warning::metal_probe exited with status $?"
+
   release:
     if: startsWith(github.ref, 'refs/tags/v')
     needs: [build, anari]
