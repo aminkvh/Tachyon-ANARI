@@ -192,6 +192,70 @@ jobs:
           name: tachyon-anari-${{ matrix.name }}
           path: dist/tachyon-anari-${{ matrix.name }}.tar.gz
 
+  shaders:
+    runs-on: macos-latest
+    env:
+      SLANG_VERSION: "2026.20"
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Restore Slang cache
+        id: slang-cache
+        uses: actions/cache@v4
+        with:
+          path: deps/slang
+          key: slang-${{ env.SLANG_VERSION }}-macos-aarch64
+
+      - name: Fetch Slang
+        if: steps.slang-cache.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p deps/slang
+          curl -fsSL -o slang.tar.gz "https://github.com/shader-slang/slang/releases/download/v${SLANG_VERSION}/slang-${SLANG_VERSION}-macos-aarch64.tar.gz"
+          tar -xzf slang.tar.gz -C deps/slang
+          rm -f slang.tar.gz
+          chmod +x deps/slang/bin/slangc
+
+      - name: Compile raytrace.slang to SPIR-V and compare with committed header
+        run: |
+          slangc="$PWD/deps/slang/bin/slangc"
+          "$slangc" -v
+          mkdir -p shader-out
+          "$slangc" anari/gpu/shaders/raytrace.slang \
+            -target spirv -profile spirv_1_4 -capability spvRayQueryKHR \
+            -entry genAabbs -stage compute -entry main -stage compute \
+            -o shader-out/raytrace.spv
+          cmake -DINPUT=shader-out/raytrace.spv -DOUTPUT=shader-out/raytrace.spv.h \
+            -DNAME=kRaytraceSpv -P anari/gpu/embed_spirv.cmake
+          # The committed header was written on Windows (CRLF); normalize before comparing.
+          tr -d '\r' < anari/gpu/shaders/raytrace.spv.h > shader-out/committed.h
+          if cmp -s shader-out/committed.h shader-out/raytrace.spv.h; then
+            echo "SPIR-V header matches the committed raytrace.spv.h"
+          else
+            echo "::notice::Generated SPIR-V header differs from the committed raytrace.spv.h"
+            diff shader-out/committed.h shader-out/raytrace.spv.h | head -n 40 || true
+          fi
+
+      - name: Compile raytrace.slang to Metal
+        run: |
+          slangc="$PWD/deps/slang/bin/slangc"
+          "$slangc" anari/gpu/shaders/raytrace.slang \
+            -target metal -entry genAabbs -stage compute -entry main -stage compute \
+            -o shader-out/raytrace.metal
+          wc -l shader-out/raytrace.metal
+
+      - name: Compile Metal source with Apple's compiler
+        run: |
+          xcrun -sdk macosx metal -std=metal3.1 -c shader-out/raytrace.metal -o shader-out/raytrace.air
+          xcrun -sdk macosx metallib shader-out/raytrace.air -o shader-out/raytrace.metallib
+
+      - name: Upload Metal source
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: raytrace-metal-source
+          path: shader-out/raytrace.metal
+          if-no-files-found: warn
+
   release:
     if: startsWith(github.ref, 'refs/tags/v')
     needs: [build, anari]
