@@ -113,6 +113,20 @@ class SceneBackend
   // 'direction': the direction the light travels (same as ANARI)
   virtual void addDirectionalLight(const float *direction, const float *rgb) = 0;
   virtual void addPointLight(const float *position, const float *rgb) = 0;
+  // Instancing (optional, GPU backends): everything added between
+  // beginPrototype() and endPrototype() is one geometry set in object space
+  // (the add*() calls then get untransformed data), placed in the scene by
+  // addInstance() calls ('xfm': 16 floats, column major 4x4, rotation +
+  // translation + uniform scale only). Backends without instancing return
+  // false here and the caller bakes the transforms into the geometry.
+  virtual bool supportsInstancing() const { return false; }
+  virtual int beginPrototype() { return -1; }
+  virtual void endPrototype() {}
+  virtual void addInstance(int prototype, const float *xfm)
+  {
+    (void)prototype;
+    (void)xfm;
+  }
   // Called after the last add*(): builds acceleration structures if needed.
   virtual void finishBuild() = 0;
 

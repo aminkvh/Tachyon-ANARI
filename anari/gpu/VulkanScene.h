@@ -4,10 +4,15 @@
 #pragma once
 
 // GPU scene backend: spheres, cylinders and triangles in bottom level
-// acceleration structures (one per primitive type, AABBs for the analytic
-// ones), one top level structure, and a compute shader that traces with ray
-// queries, shades like Tachyon's full shader (lights, shadows, Blinn
-// highlights, transparency) and writes the frame in its final pixel format.
+// acceleration structures (one per primitive type and prototype, AABBs for the
+// analytic ones), one top level structure with an instance per placement, and
+// a compute shader that traces with ray queries, shades like Tachyon's full
+// shader (lights, shadows, Blinn highlights, transparency) and writes the
+// frame in its final pixel format.
+//
+// When consecutive builds have the same topology (the usual MD trajectory
+// case: positions change, counts do not) the buffers are updated in place and
+// the acceleration structures are refitted instead of rebuilt.
 
 #include "../SceneBackend.h"
 #include "VulkanContext.h"
@@ -58,6 +63,10 @@ class VulkanScene : public SceneBackend
       int caps) override;
   void addDirectionalLight(const float *direction, const float *rgb) override;
   void addPointLight(const float *position, const float *rgb) override;
+  bool supportsInstancing() const override { return true; }
+  int beginPrototype() override;
+  void endPrototype() override;
+  void addInstance(int prototype, const float *xfm) override;
   void finishBuild() override;
 
   void setShading(float ambient, float diffuseScale) override;
@@ -85,6 +94,93 @@ class VulkanScene : public SceneBackend
     GpuBuffer buffer;
     VkAccelerationStructureKHR as{VK_NULL_HANDLE};
     VkDeviceAddress address{0};
+    VkDeviceSize updateScratch{0};
+  };
+
+  struct Run
+  {
+    size_t count;
+    int style;
+  };
+
+  // Everything added between beginPrototype() and endPrototype() (prototype 0
+  // is the scene itself)
+  struct Proto
+  {
+    std::vector<float> spheres; // 4 floats per sphere: center, radius
+    std::vector<float> sphereColors; // 3 per sphere, only when needed
+    std::vector<uint32_t> sphereStyles; // only when styles differ
+    std::vector<Run> sphereRuns;
+    bool sphereColorsActive{false}, sphereStylesActive{false};
+    int sphereStyle0{0};
+
+    std::vector<float> cyls; // 8 floats per cylinder: p0, r, p1, caps (bits)
+    std::vector<float> cylColors; // 6 per cylinder (color at p0, at p1)
+    std::vector<uint32_t> cylStyles;
+    std::vector<Run> cylRuns;
+    bool cylColorsActive{false}, cylStylesActive{false};
+    int cylStyle0{0};
+
+    std::vector<float> triPos; // 9 per triangle
+    std::vector<float> triShade; // 12 per triangle
+    std::vector<float> triAux; // vertex colors (9) / attributes (12)
+  };
+
+  struct Placement
+  {
+    int proto;
+    float m[12]; // object to world, rows of a 3x4 matrix
+  };
+
+  struct Light
+  {
+    float v[3]; // direction to the light | position
+    int type; // 0 directional, 1 point
+    float color[3];
+  };
+
+  // A run of primitives of one type belonging to one prototype: one BLAS
+  struct Slice
+  {
+    int proto;
+    int type; // 0 spheres, 1 cylinders, 2 triangles
+    uint32_t base;
+    uint32_t count;
+  };
+  struct InstanceEntry
+  {
+    int slice;
+    float m[12];
+    uint32_t flags; // 1 identity, 2 negative determinant
+  };
+
+  // What decides whether a new build can refit the existing structures
+  struct Signature
+  {
+    std::vector<uint32_t> layout;
+    std::vector<float> styles;
+    uint32_t flags{0};
+    size_t aux{0}, texels{0}, samplers{0};
+    bool operator==(const Signature &o) const
+    {
+      return layout == o.layout && styles == o.styles && flags == o.flags
+          && aux == o.aux && texels == o.texels && samplers == o.samplers;
+    }
+  };
+
+  // The scene in its final GPU layout
+  struct Gathered
+  {
+    std::vector<float> spheres, sphereColors, cyls, cylColors;
+    std::vector<uint32_t> sphereStyles, cylStyles;
+    std::vector<float> triPos, triShade, triAux;
+    std::vector<float> styles, samplerTable, texels, instTable;
+    std::vector<Slice> slices;
+    std::vector<InstanceEntry> instances;
+    uint32_t flags{0};
+    uint32_t styleUniform[2]{0, 0};
+    uint32_t nSph{0}, nCyl{0}, nTri{0};
+    Signature sig;
   };
 
   explicit VulkanScene(std::shared_ptr<VulkanContext> ctx);
@@ -95,25 +191,33 @@ class VulkanScene : public SceneBackend
   GpuBuffer deviceBuffer(
       const void *data, size_t bytes, VkBufferUsageFlags usage);
   void upload(GpuBuffer &dst, const void *src, size_t bytes);
+  // creates the buffer for 'binding' or, when it exists, overwrites it
+  void putBuffer(int binding,
+      const void *data,
+      size_t bytes,
+      VkBufferUsageFlags usage);
   void generateAabbs(uint32_t set, uint32_t count, GpuBuffer &aabbs);
-  Blas buildBlas(const VkAccelerationStructureGeometryKHR &geom, uint32_t prims);
-  void buildTlas(const Blas *blas, const uint32_t *types, int count);
+  Blas buildBlas(const VkAccelerationStructureGeometryKHR &geom,
+      uint32_t prims,
+      bool updatable);
+  void updateBlas(Blas &blas,
+      const VkAccelerationStructureGeometryKHR &geom,
+      uint32_t prims);
+  void buildTlas(const Gathered &g);
   void destroyBlas(Blas &b);
-  void ensureSphereColors();
-  void ensureSphereStyles();
-  void ensureCylColors();
-  void ensureCylStyles();
+  void ensureColors(Proto &p, bool sphere);
+  void ensureStyles(Proto &p, bool sphere);
+  Gathered gather();
+  void buildFull(Gathered &g, bool updatable);
+  void refit(Gathered &g);
+  void buildSlices(const Gathered &g, bool updatable, bool refitOnly);
+  void uploadSceneData(const Gathered &g);
+  void ensureLightBuffer();
   void updateDescriptors();
   void fillDirectBackground();
 
   std::shared_ptr<VulkanContext> m_ctx;
 
-  // pipelines (live as long as the scene object)
-  VkShaderModule m_module{VK_NULL_HANDLE};
-  VkDescriptorSetLayout m_setLayout{VK_NULL_HANDLE};
-  VkPipelineLayout m_pipeLayout{VK_NULL_HANDLE};
-  VkPipeline m_aabbPipe{VK_NULL_HANDLE};
-  VkPipeline m_tracePipe{VK_NULL_HANDLE};
   VkDescriptorPool m_descPool{VK_NULL_HANDLE};
   VkDescriptorSet m_set{VK_NULL_HANDLE};
   GpuBuffer m_dummy; // bound for unused bindings
@@ -122,51 +226,28 @@ class VulkanScene : public SceneBackend
   size_t m_lightCapacity{0};
 
   // host side scene description, released by finishBuild()
-  struct Run
-  {
-    size_t count;
-    int style;
-  };
   std::vector<SurfaceStyle> m_styles;
-
-  std::vector<float> m_spheres; // 4 floats per sphere: center, radius
-  std::vector<float> m_sphereColors; // 3 per sphere, only when needed
-  std::vector<uint32_t> m_sphereStyles; // only when styles differ
-  std::vector<Run> m_sphereRuns;
-  bool m_sphereColorsActive{false}, m_sphereStylesActive{false};
-  int m_sphereStyle0{0};
-
-  std::vector<float> m_cyls; // 8 floats per cylinder: p0, r, p1, caps (bits)
-  std::vector<float> m_cylColors; // 6 per cylinder (color at p0, at p1)
-  std::vector<uint32_t> m_cylStyles;
-  std::vector<Run> m_cylRuns;
-  bool m_cylColorsActive{false}, m_cylStylesActive{false};
-  int m_cylStyle0{0};
-
-  std::vector<float> m_triPos; // 9 per triangle
-  std::vector<float> m_triShade; // 12 per triangle
-  std::vector<float> m_triAux; // vertex colors (9) / attributes (12)
+  std::vector<Proto> m_protos;
+  size_t m_cur{0};
+  std::vector<Placement> m_placements;
   std::map<const void *, int> m_samplerIds;
   std::vector<SamplerDesc> m_samplers;
-
-  struct Light
-  {
-    float v[3]; // direction to the light | position
-    int type; // 0 directional, 1 point
-    float color[3];
-  };
   std::vector<Light> m_lights;
 
   // GPU scene
-  GpuBuffer m_buf[19]; // by shader binding (1..17)
-  Blas m_blasSphere, m_blasCyl, m_blasTri;
+  GpuBuffer m_buf[20]; // by shader binding (1..18)
+  std::vector<Blas> m_blas; // per slice
   GpuBuffer m_tlasBuf;
   VkAccelerationStructureKHR m_tlas{VK_NULL_HANDLE};
-  uint32_t m_counts[3]{0, 0, 0}; // spheres, cylinders, triangles built
   uint32_t m_sceneFlags{0};
   uint32_t m_styleUniform[2]{0, 0};
   uint64_t m_buildId{0};
   bool m_descDirty{true};
+  Signature m_sig;
+  bool m_haveSig{false};
+  bool m_updatable{false}; // the BLASes were built with ALLOW_UPDATE
+  unsigned m_refits{0};
+  unsigned m_maxRefits{100};
 
   // outputs
   GpuBuffer m_outBuf, m_depthBuf, m_readBuf, m_depthReadBuf, m_accumBuf;

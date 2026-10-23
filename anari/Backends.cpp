@@ -17,6 +17,23 @@ std::unique_ptr<SceneBackend> createCpuBackend()
   return std::make_unique<TachyonScene>();
 }
 
+void prefetchBackend(const std::string &preference)
+{
+#ifdef TACHYON_ANARI_VULKAN
+  if (preference != "cpu")
+    gpu::VulkanContext::prefetch();
+#else
+  (void)preference;
+#endif
+}
+
+void waitForBackendPrefetch()
+{
+#ifdef TACHYON_ANARI_VULKAN
+  gpu::VulkanContext::waitPrefetch();
+#endif
+}
+
 BackendChoice createBackend(const std::string &preference)
 {
   BackendChoice c;

@@ -7,6 +7,7 @@
 // std
 #include <algorithm>
 #include <chrono>
+#include <cstdlib>
 #include <cstring>
 #include <exception>
 #include <stdexcept>
@@ -92,6 +93,32 @@ struct UnsuitableScene : std::runtime_error
   using std::runtime_error::runtime_error;
 };
 } // namespace
+
+// An instance the GPU can place without baking: no per-instance attributes
+// and a rotation + translation + uniform scale transform
+static bool instanceable(const SurfaceInstance &si)
+{
+  if (si.instAttr)
+    for (const auto &a : *si.instAttr)
+      if (a)
+        return false;
+  const mat4 &m = si.xfm;
+  if (m[0].w != 0.f || m[1].w != 0.f || m[2].w != 0.f || m[3].w != 1.f)
+    return false;
+  const float3 c0(m[0].x, m[0].y, m[0].z), c1(m[1].x, m[1].y, m[1].z),
+      c2(m[2].x, m[2].y, m[2].z);
+  const float l0 = linalg::length(c0), l1 = linalg::length(c1),
+              l2 = linalg::length(c2);
+  if (!(l0 > 0.f) || !(l1 > 0.f) || !(l2 > 0.f))
+    return false;
+  const float tol = 1e-4f * l0;
+  if (std::abs(l1 - l0) > tol || std::abs(l2 - l0) > tol)
+    return false;
+  const float tolDot = 1e-4f * l0 * l0;
+  return std::abs(linalg::dot(c0, c1)) <= tolDot
+      && std::abs(linalg::dot(c0, c2)) <= tolDot
+      && std::abs(linalg::dot(c1, c2)) <= tolDot;
+}
 
 // Row 0 of Tachyon's float output is the top image row; ANARI frame buffers
 // start at the bottom row.
@@ -182,7 +209,7 @@ void Frame::rebuildScene(helium::TimeStamp sceneStamp)
       li.light->emit(*m_scene, li.xfm);
   }
 
-  for (auto &si : surfaces) {
+  auto emitSurface = [&](const SurfaceInstance &si) {
     const Geometry *g = si.surface->geometry();
     const Material *m = si.surface->material();
 
@@ -200,7 +227,7 @@ void Frame::rebuildScene(helium::TimeStamp sceneStamp)
       if (!m->isValid()) {
         reportMessage(ANARI_SEVERITY_DEBUG,
             "skipping surface with unsupported material");
-        continue;
+        return;
       }
       const int attr = m->colorAttribute();
       if (const Sampler *cs = m->colorSampler()) {
@@ -348,17 +375,51 @@ void Frame::rebuildScene(helium::TimeStamp sceneStamp)
         b->attrMask = mask;
         binder = std::move(b);
       } else if (!m->fillStyle(style, colorAlpha, &sc, preview)) {
-        continue; // fully transparent
+        return; // fully transparent
       }
     }
 
     if (binder) {
       g->emit(*m_scene, -1, si.xfm, colorAttr, binder.get(), colorSampler);
-      continue;
+      return;
     }
     const int id = m_scene->addStyle(style);
     g->emit(*m_scene, id, si.xfm, colorAttr, nullptr, colorSampler);
+  };
+
+  // GPU backends place geometry that is used more than once as real
+  // instances (one acceleration structure however many placements); the
+  // others get every placement baked into the geometry
+  std::vector<char> placed(surfaces.size(), 0);
+  if (m_scene->supportsInstancing() && !std::getenv("TACHYON_NO_INSTANCING")) {
+    std::vector<const Surface *> order;
+    std::unordered_map<const Surface *, std::vector<size_t>> groups;
+    for (size_t i = 0; i < surfaces.size(); i++) {
+      if (!instanceable(surfaces[i]))
+        continue;
+      auto &grp = groups[surfaces[i].surface];
+      if (grp.empty())
+        order.push_back(surfaces[i].surface);
+      grp.push_back(i);
+    }
+    for (const Surface *key : order) {
+      const auto &grp = groups[key];
+      if (grp.size() < 2)
+        continue;
+      SurfaceInstance proto = surfaces[grp[0]];
+      proto.xfm = mat4(linalg::identity);
+      const int id = m_scene->beginPrototype();
+      emitSurface(proto);
+      m_scene->endPrototype();
+      for (size_t i : grp) {
+        m_scene->addInstance(id, &surfaces[i].xfm[0].x);
+        placed[i] = 1;
+      }
+    }
   }
+  for (size_t i = 0; i < surfaces.size(); i++)
+    if (!placed[i])
+      emitSurface(surfaces[i]);
 
   m_scene->finishBuild();
 

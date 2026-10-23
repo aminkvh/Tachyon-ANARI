@@ -3,11 +3,14 @@
 
 #include "VulkanContext.h"
 
+#include "shaders/raytrace.spv.h"
+
 #include <algorithm>
 #include <cstdlib>
 #include <chrono>
 #include <cstdio>
 #include <cstring>
+#include <future>
 #include <mutex>
 #include <vector>
 
@@ -20,6 +23,21 @@ std::weak_ptr<VulkanContext> g_context;
 bool g_failed{false};
 bool g_failedHard{false};
 std::string g_failReason;
+
+// TACHYON_VULKAN_DEBUG=1: print the time of the initialization phases
+void phase(const char *what)
+{
+  static const char *dbg = std::getenv("TACHYON_VULKAN_DEBUG");
+  if (!dbg || !*dbg || *dbg == '0')
+    return;
+  static auto last = std::chrono::steady_clock::now();
+  const auto now = std::chrono::steady_clock::now();
+  std::fprintf(stderr,
+      "[tachyon vulkan]   %s: %.0f ms\n",
+      what,
+      std::chrono::duration<double, std::milli>(now - last).count());
+  last = now;
+}
 
 bool hasExtension(
     const std::vector<VkExtensionProperties> &exts, const char *name)
@@ -35,8 +53,16 @@ std::shared_ptr<VulkanContext> VulkanContext::acquire(
     std::string &reason, bool &hard)
 {
   std::lock_guard<std::mutex> lock(g_mutex);
-  if (auto ctx = g_context.lock())
-    return ctx;
+  if (auto ctx = g_context.lock()) {
+    if (!ctx->lost())
+      return ctx;
+    g_failed = true;
+    g_failedHard = true;
+    g_failReason = "the Vulkan device was lost";
+    reason = g_failReason;
+    hard = true;
+    return nullptr;
+  }
   if (g_failed) { // do not probe the driver again and again
     reason = g_failReason;
     hard = g_failedHard;
@@ -67,9 +93,87 @@ std::shared_ptr<VulkanContext> VulkanContext::acquire(
   return ctx;
 }
 
+namespace {
+std::future<void> *g_prefetch = nullptr;
+std::once_flag g_prefetchOnce;
+} // namespace
+
+void VulkanContext::prefetch()
+{
+  std::call_once(g_prefetchOnce, []() {
+    // never destroyed: the future of a running std::async blocks its destructor
+    g_prefetch = new std::future<void>(std::async(std::launch::async, []() {
+      std::string reason;
+      bool hard = false;
+      (void)VulkanContext::acquire(reason, hard);
+    }));
+  });
+}
+
+void VulkanContext::waitPrefetch()
+{
+  if (g_prefetch && g_prefetch->valid())
+    g_prefetch->wait();
+}
+
+bool VulkanContext::createPipelines(std::string &reason)
+{
+  VkShaderModuleCreateInfo smi{VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO};
+  smi.codeSize = size_t(kRaytraceSpvSize);
+  smi.pCode = reinterpret_cast<const uint32_t *>(kRaytraceSpv);
+  VkDescriptorSetLayoutBinding bind[kNumBindings]{};
+  for (int i = 0; i < kNumBindings; i++) {
+    bind[i].binding = uint32_t(i);
+    bind[i].descriptorType = i == 0 ? VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR
+        : i == kNumBindings - 1     ? VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER
+                                    : VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    bind[i].descriptorCount = 1;
+    bind[i].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+  }
+  VkDescriptorSetLayoutCreateInfo dsl{
+      VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
+  dsl.bindingCount = kNumBindings;
+  dsl.pBindings = bind;
+  VkPipelineLayoutCreateInfo pli{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
+  pli.setLayoutCount = 1;
+  if (vkCreateShaderModule(m_device, &smi, nullptr, &m_module) != VK_SUCCESS
+      || vkCreateDescriptorSetLayout(m_device, &dsl, nullptr, &m_setLayout)
+          != VK_SUCCESS) {
+    reason = "could not create the shader module";
+    return false;
+  }
+  pli.pSetLayouts = &m_setLayout;
+  if (vkCreatePipelineLayout(m_device, &pli, nullptr, &m_pipeLayout)
+      != VK_SUCCESS) {
+    reason = "could not create the pipeline layout";
+    return false;
+  }
+  const char *names[2] = {"genAabbs", "main"};
+  VkPipeline *pipes[2] = {&m_aabbPipe, &m_tracePipe};
+  for (int i = 0; i < 2; i++) {
+    VkComputePipelineCreateInfo ci{VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO};
+    ci.stage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    ci.stage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
+    ci.stage.module = m_module;
+    ci.stage.pName = names[i];
+    ci.layout = m_pipeLayout;
+    if (vkCreateComputePipelines(m_device, VK_NULL_HANDLE, 1, &ci, nullptr, pipes[i])
+        != VK_SUCCESS) {
+      reason = "could not create the compute pipelines";
+      return false;
+    }
+  }
+  return true;
+}
+
 bool VulkanContext::init(std::string &reason, bool &hard)
 {
   hard = false;
+  phase("start");
+  if (const char *e = std::getenv("TACHYON_VULKAN_MEMORY_LIMIT_MB"))
+    m_memoryLimit = size_t(std::atoll(e)) << 20;
+  if (const char *e = std::getenv("TACHYON_VULKAN_FAKE_LOST"))
+    m_fakeLostAfter = std::atol(e);
   if (volkInitialize() != VK_SUCCESS) {
     reason = "no Vulkan loader found";
     return false;
@@ -90,6 +194,7 @@ bool VulkanContext::init(std::string &reason, bool &hard)
     hard = true;
     return false;
   }
+  phase("vkCreateInstance");
   volkLoadInstanceOnly(m_instance);
 
   uint32_t count = 0;
@@ -190,7 +295,9 @@ bool VulkanContext::init(std::string &reason, bool &hard)
     dci.pQueueCreateInfos = &qci;
     dci.enabledExtensionCount = 3;
     dci.ppEnabledExtensionNames = devExts;
+    phase("device selection");
     res = vkCreateDevice(pd, &dci, nullptr, &m_device);
+    phase("vkCreateDevice");
     if (res != VK_SUCCESS) {
       why += name + ": vkCreateDevice failed; ";
       continue;
@@ -222,6 +329,12 @@ bool VulkanContext::init(std::string &reason, bool &hard)
       hard = true;
       return false;
     }
+    phase("command pool");
+    if (!createPipelines(reason)) {
+      hard = true;
+      return false;
+    }
+    phase("pipelines");
     return true;
   }
 
@@ -235,6 +348,16 @@ VulkanContext::~VulkanContext()
 {
   if (m_device) {
     vkDeviceWaitIdle(m_device);
+    if (m_aabbPipe)
+      vkDestroyPipeline(m_device, m_aabbPipe, nullptr);
+    if (m_tracePipe)
+      vkDestroyPipeline(m_device, m_tracePipe, nullptr);
+    if (m_pipeLayout)
+      vkDestroyPipelineLayout(m_device, m_pipeLayout, nullptr);
+    if (m_setLayout)
+      vkDestroyDescriptorSetLayout(m_device, m_setLayout, nullptr);
+    if (m_module)
+      vkDestroyShaderModule(m_device, m_module, nullptr);
     if (m_fence)
       vkDestroyFence(m_device, m_fence, nullptr);
     if (m_pool)
@@ -260,6 +383,7 @@ uint32_t VulkanContext::findMemoryType(uint32_t typeBits,
 GpuBuffer VulkanContext::createBuffer(
     VkDeviceSize size, VkBufferUsageFlags usage, MemoryKind kind)
 {
+  std::lock_guard<std::mutex> lock(m_allocMutex);
   GpuBuffer b;
   VkBufferCreateInfo bci{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
   bci.size = std::max<VkDeviceSize>(size, 16);
@@ -270,6 +394,11 @@ GpuBuffer VulkanContext::createBuffer(
 
   VkMemoryRequirements req;
   vkGetBufferMemoryRequirements(m_device, b.buffer, &req);
+  if (kind == MemoryKind::DeviceLocal && m_memoryLimit
+      && m_deviceBytes + req.size > m_memoryLimit) {
+    vkDestroyBuffer(m_device, b.buffer, nullptr); // simulated exhaustion
+    throw std::runtime_error("Vulkan out of memory (simulated limit)");
+  }
 
   uint32_t type = ~0u;
   const VkMemoryPropertyFlags dl = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
@@ -332,6 +461,7 @@ void VulkanContext::destroyBuffer(GpuBuffer &b)
 {
   if (!b.buffer)
     return;
+  std::lock_guard<std::mutex> lock(m_allocMutex);
   if (b.mapped)
     vkUnmapMemory(m_device, b.memory);
   vkDestroyBuffer(m_device, b.buffer, nullptr);
@@ -378,12 +508,19 @@ void VulkanContext::endAndWait(VkCommandBuffer cb)
   si.pCommandBuffers = &cb;
   vkResetFences(m_device, 1, &m_fence);
   VkResult r = vkQueueSubmit(m_queue, 1, &si, m_fence);
+  if (m_fakeLostAfter >= 0 && m_fakeLostAfter-- == 0) {
+    vkWaitForFences(m_device, 1, &m_fence, VK_TRUE, UINT64_MAX);
+    r = VK_ERROR_DEVICE_LOST; // simulated for tests
+  }
   if (r == VK_SUCCESS)
     r = vkWaitForFences(m_device, 1, &m_fence, VK_TRUE, UINT64_MAX);
   vkFreeCommandBuffers(m_device, m_pool, 1, &cb);
+  if (r == VK_ERROR_DEVICE_LOST)
+    m_lost = true;
   if (r != VK_SUCCESS)
-    throw std::runtime_error(
-        "Vulkan submit failed (" + std::to_string(int(r)) + ")");
+    throw std::runtime_error(r == VK_ERROR_DEVICE_LOST
+            ? std::string("the Vulkan device was lost")
+            : "Vulkan submit failed (" + std::to_string(int(r)) + ")");
 }
 
 } // namespace gpu

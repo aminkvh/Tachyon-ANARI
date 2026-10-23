@@ -14,6 +14,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <mutex>
 #include <stdexcept>
 #include <string>
 
@@ -39,6 +40,9 @@ enum class MemoryKind
   Readback // host visible + cached when available
 };
 
+// Descriptor set layout shared by the shaders (see shaders/raytrace.slang)
+constexpr int kNumBindings = 20; // 0: acceleration structure, 19: uniforms
+
 class VulkanContext
 {
  public:
@@ -47,6 +51,12 @@ class VulkanContext
   // failure (driver error) from "no capable GPU / no Vulkan".
   static std::shared_ptr<VulkanContext> acquire(std::string &reason, bool &hard);
 
+  // Starts creating the context on a background thread (it takes up to
+  // 2 s, mostly in the Vulkan loader); acquire() then only waits for the
+  // remainder. waitPrefetch() blocks until that thread is done.
+  static void prefetch();
+  static void waitPrefetch();
+
   ~VulkanContext();
   VulkanContext(const VulkanContext &) = delete;
   VulkanContext &operator=(const VulkanContext &) = delete;
@@ -54,6 +64,16 @@ class VulkanContext
   const std::string &gpuName() const { return m_gpuName; }
   VkDevice device() const { return m_device; }
   uint32_t scratchAlignment() const { return m_scratchAlign; }
+
+  // Compute pipelines shared by all scenes: bounding box generation and the
+  // tracer (one descriptor set layout, no push constants)
+  VkDescriptorSetLayout setLayout() const { return m_setLayout; }
+  VkPipelineLayout pipelineLayout() const { return m_pipeLayout; }
+  VkPipeline aabbPipeline() const { return m_aabbPipe; }
+  VkPipeline tracePipeline() const { return m_tracePipe; }
+
+  // set after a VK_ERROR_DEVICE_LOST: the context is unusable
+  bool lost() const { return m_lost; }
 
   GpuBuffer createBuffer(
       VkDeviceSize size, VkBufferUsageFlags usage, MemoryKind kind);
@@ -69,6 +89,7 @@ class VulkanContext
   template <class F>
   void submitAndWait(F &&record)
   {
+    std::lock_guard<std::mutex> lock(m_submitMutex);
     VkCommandBuffer cb = beginCommands();
     record(cb);
     endAndWait(cb);
@@ -83,6 +104,15 @@ class VulkanContext
       VkMemoryPropertyFlags want,
       VkMemoryPropertyFlags avoid) const;
 
+  bool createPipelines(std::string &reason);
+
+  VkShaderModule m_module{VK_NULL_HANDLE};
+  VkDescriptorSetLayout m_setLayout{VK_NULL_HANDLE};
+  VkPipelineLayout m_pipeLayout{VK_NULL_HANDLE};
+  VkPipeline m_aabbPipe{VK_NULL_HANDLE};
+  VkPipeline m_tracePipe{VK_NULL_HANDLE};
+  std::mutex m_submitMutex, m_allocMutex;
+  bool m_lost{false};
   VkInstance m_instance{VK_NULL_HANDLE};
   VkPhysicalDevice m_phys{VK_NULL_HANDLE};
   VkDevice m_device{VK_NULL_HANDLE};
@@ -95,6 +125,9 @@ class VulkanContext
   std::string m_gpuName;
   size_t m_deviceBytes{0};
   size_t m_peakDeviceBytes{0};
+  // test hooks (TACHYON_VULKAN_MEMORY_LIMIT_MB, TACHYON_VULKAN_FAKE_LOST)
+  size_t m_memoryLimit{0};
+  long m_fakeLostAfter{-1};
 };
 
 } // namespace gpu

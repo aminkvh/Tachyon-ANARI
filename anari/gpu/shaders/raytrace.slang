@@ -73,13 +73,15 @@ static const uint FMT_F32 = 3u;
 [[vk::binding(15, 0)]] RWStructuredBuffer<float> outDepth;
 [[vk::binding(16, 0)]] RWStructuredBuffer<float> accum; // 3 per pixel
 [[vk::binding(17, 0)]] RWStructuredBuffer<float> aabbs; // 6 per primitive
-[[vk::binding(18, 0)]] ConstantBuffer<FrameData> fd;
+// TLAS instance records, see the Instances section below
+[[vk::binding(18, 0)]] StructuredBuffer<float4> instances;
+[[vk::binding(19, 0)]] ConstantBuffer<FrameData> fd;
 
 [shader("compute")]
 [numthreads(64, 1, 1)]
 void genAabbs(uint3 tid : SV_DispatchThreadID)
 {
-    uint i = tid.x;
+    uint i = tid.x + tid.y * fd.styles.z; // 2D dispatch for large counts
     if (fd.flags.w == 0u)
     {
         if (i >= fd.counts.x)
@@ -223,13 +225,86 @@ bool hitCylinder(uint i, float3 o, float3 d, float tmin, float tmax,
     return found;
 }
 
+// Instances ///////////////////////////////////////////////////////////////////
+
+// Every TLAS instance has a record in "instances" (4 float4):
+//   (type, first primitive of its slice, flags, unused), then the rows of the
+//   object-to-world matrix (3x3 in xyz, translation in w).
+// type: 0 spheres, 1 cylinders, 2 triangles. flags: 1 identity transform,
+// 2 negative determinant. The transforms are rotations, translations and
+// uniform scales, so normals transform like directions.
+struct InstInfo
+{
+    uint type;
+    uint base;
+    uint flags;
+    float4 r0;
+    float4 r1;
+    float4 r2;
+};
+
+InstInfo loadInst(uint i)
+{
+    InstInfo f;
+    uint4 hdr = asuint(instances[4u * i]);
+    f.type = hdr.x;
+    f.base = hdr.y;
+    f.flags = hdr.z;
+    f.r0 = instances[4u * i + 1u];
+    f.r1 = instances[4u * i + 2u];
+    f.r2 = instances[4u * i + 3u];
+    return f;
+}
+
+float3 rotate(InstInfo f, float3 v)
+{
+    return float3(dot(f.r0.xyz, v), dot(f.r1.xyz, v), dot(f.r2.xyz, v));
+}
+
+float3 toWorld(InstInfo f, float3 p)
+{
+    return rotate(f, p) + float3(f.r0.w, f.r1.w, f.r2.w);
+}
+
+// ray into object space (inverse of a similarity: transpose / scale^2)
+void toObjectRay(InstInfo f, float3 o, float3 d, out float3 oo, out float3 od)
+{
+    float s2 = dot(f.r0.xyz, f.r0.xyz);
+    float3 q = o - float3(f.r0.w, f.r1.w, f.r2.w);
+    oo = (f.r0.xyz * q.x + f.r1.xyz * q.y + f.r2.xyz * q.z) / s2;
+    od = (f.r0.xyz * d.x + f.r1.xyz * d.y + f.r2.xyz * d.z) / s2;
+}
+
 // Closest hit ///////////////////////////////////////////////////////////////
+
+// Intersects a candidate primitive given the object space ray the hardware
+// computed for its instance; t is the same ray parameter as in world space.
+bool procHit(uint inst, uint localPrim, float3 oo, float3 od, float tmin,
+    float tmax, out float t)
+{
+    uint4 hdr = asuint(instances[4u * inst]);
+    uint gi = hdr.y + localPrim;
+    float dl = length(od);
+    float3 dn = od / dl;
+    float tn;
+    bool hit;
+    if (hdr.x == 0u)
+        hit = hitSphere(gi, oo, dn, tmin * dl, tmax * dl, tn);
+    else
+    {
+        float3 n;
+        float sel;
+        hit = hitCylinder(gi, oo, dn, tmin * dl, tmax * dl, tn, n, sel);
+    }
+    t = tn / dl;
+    return hit;
+}
 
 struct Hit
 {
     bool valid;
-    uint type; // 0 sphere, 1 cylinder, 2 triangle
-    uint prim;
+    uint inst; // instance record
+    uint prim; // primitive within the instance's slice
     float t;
     float2 bary;
 };
@@ -238,7 +313,7 @@ Hit closestHit(float3 o, float3 d, float tmin, float tmax)
 {
     Hit h;
     h.valid = false;
-    h.type = 0u;
+    h.inst = 0u;
     h.prim = 0u;
     h.t = tmax;
     h.bary = float2(0, 0);
@@ -255,19 +330,11 @@ Hit closestHit(float3 o, float3 d, float tmin, float tmax)
     {
         if (q.CandidateType() == CANDIDATE_PROCEDURAL_PRIMITIVE)
         {
-            uint type = q.CandidateInstanceID();
-            uint prim = q.CandidatePrimitiveIndex();
             float t;
-            bool hit;
-            if (type == 0u)
-                hit = hitSphere(prim, o, d, tmin, best, t);
-            else
-            {
-                float3 n;
-                float sel;
-                hit = hitCylinder(prim, o, d, tmin, best, t, n, sel);
-            }
-            if (hit && t < best)
+            if (procHit(q.CandidateInstanceID(), q.CandidatePrimitiveIndex(),
+                    q.CandidateObjectRayOrigin(), q.CandidateObjectRayDirection(),
+                    tmin, best, t)
+                && t < best)
             {
                 best = t;
                 q.CommitProceduralPrimitiveHit(t);
@@ -278,14 +345,14 @@ Hit closestHit(float3 o, float3 d, float tmin, float tmax)
     if (status == COMMITTED_PROCEDURAL_PRIMITIVE_HIT)
     {
         h.valid = true;
-        h.type = q.CommittedInstanceID();
+        h.inst = q.CommittedInstanceID();
         h.prim = q.CommittedPrimitiveIndex();
         h.t = best;
     }
     else if (status == COMMITTED_TRIANGLE_HIT)
     {
         h.valid = true;
-        h.type = 2u;
+        h.inst = q.CommittedInstanceID();
         h.prim = q.CommittedPrimitiveIndex();
         h.t = q.CommittedRayT();
         h.bary = q.CommittedTriangleBarycentrics();
@@ -293,7 +360,7 @@ Hit closestHit(float3 o, float3 d, float tmin, float tmax)
     return h;
 }
 
-// True when anything blocks the ray before 'tmax'
+// True when anything blocks the ray before "tmax"
 bool occluded(float3 o, float3 d, float tmin, float tmax)
 {
     RayDesc ray;
@@ -307,19 +374,10 @@ bool occluded(float3 o, float3 d, float tmin, float tmax)
     {
         if (q.CandidateType() == CANDIDATE_PROCEDURAL_PRIMITIVE)
         {
-            uint type = q.CandidateInstanceID();
-            uint prim = q.CandidatePrimitiveIndex();
             float t;
-            bool hit;
-            if (type == 0u)
-                hit = hitSphere(prim, o, d, tmin, tmax, t);
-            else
-            {
-                float3 n;
-                float sel;
-                hit = hitCylinder(prim, o, d, tmin, tmax, t, n, sel);
-            }
-            if (hit)
+            if (procHit(q.CandidateInstanceID(), q.CandidatePrimitiveIndex(),
+                    q.CandidateObjectRayOrigin(), q.CandidateObjectRayDirection(),
+                    tmin, tmax, t))
                 q.CommitProceduralPrimitiveHit(t);
         }
     }
@@ -437,11 +495,13 @@ float4 evalSampler(uint sid, float4 attr)
 
 uint primStyle(Hit h)
 {
-    if (h.type == 0u)
-        return (fd.flags.x & F_SPHERE_STYLES) != 0u ? sphereStyles[h.prim] : fd.styles.x;
-    if (h.type == 1u)
-        return (fd.flags.x & F_CYL_STYLES) != 0u ? cylStyles[h.prim] : fd.styles.y;
-    return asuint(triShade[12u * h.prim + 9u]);
+    InstInfo info = loadInst(h.inst);
+    uint gi = info.base + h.prim;
+    if (info.type == 0u)
+        return (fd.flags.x & F_SPHERE_STYLES) != 0u ? sphereStyles[gi] : fd.styles.x;
+    if (info.type == 1u)
+        return (fd.flags.x & F_CYL_STYLES) != 0u ? cylStyles[gi] : fd.styles.y;
+    return asuint(triShade[12u * gi + 9u]);
 }
 
 // Light left after the shadow ray: opaque surfaces (opacity >= 0.99999) block
@@ -489,35 +549,45 @@ Surface fetchSurface(Hit h, float3 o, float3 d)
     s.color = float3(0, 0, 0);
     s.style = 0u;
     bool ownColor = false;
-    if (h.type == 0u)
+    InstInfo info = loadInst(h.inst);
+    bool ident = (info.flags & 1u) != 0u;
+    uint gi = info.base + h.prim;
+    float3 oo = o;
+    float3 od = d;
+    if (!ident)
+        toObjectRay(info, o, d, oo, od);
+
+    if (info.type == 0u)
     {
-        float4 sp = spheres[h.prim];
-        s.n = (s.p - sp.xyz) / sp.w;
+        float4 sp = spheres[gi];
+        float3 n = (oo + h.t * od - sp.xyz) / sp.w;
+        s.n = ident ? n : normalize(rotate(info, n));
         ownColor = (fd.flags.x & F_SPHERE_COLORS) != 0u;
         if (ownColor)
-            s.color = vec3At(sphereColors, 3u * h.prim);
-        s.style = (fd.flags.x & F_SPHERE_STYLES) != 0u ? sphereStyles[h.prim] : fd.styles.x;
+            s.color = vec3At(sphereColors, 3u * gi);
+        s.style = (fd.flags.x & F_SPHERE_STYLES) != 0u ? sphereStyles[gi] : fd.styles.x;
     }
-    else if (h.type == 1u)
+    else if (info.type == 1u)
     {
         float t;
         float3 n;
         float sel;
-        hitCylinder(h.prim, o, d, 0.0, h.t * 1.0001 + 1e-6, t, n, sel);
-        s.n = n;
+        float dl = length(od);
+        hitCylinder(gi, oo, od / dl, 0.0, (h.t * 1.0001 + 1e-6) * dl, t, n, sel);
+        s.n = ident ? n : normalize(rotate(info, n));
         ownColor = (fd.flags.x & F_CYL_COLORS) != 0u;
         if (ownColor)
-            s.color = sel < 0.5 ? vec3At(cylColors, 6u * h.prim)
-                                : vec3At(cylColors, 6u * h.prim + 3u);
-        s.style = (fd.flags.x & F_CYL_STYLES) != 0u ? cylStyles[h.prim] : fd.styles.y;
+            s.color = sel < 0.5 ? vec3At(cylColors, 6u * gi)
+                                : vec3At(cylColors, 6u * gi + 3u);
+        s.style = (fd.flags.x & F_CYL_STYLES) != 0u ? cylStyles[gi] : fd.styles.y;
     }
     else
     {
-        uint tb = 9u * h.prim;
+        uint tb = 9u * gi;
         float3 v0 = vec3At(triPos, tb);
         float3 v1 = vec3At(triPos, tb + 3u);
         float3 v2 = vec3At(triPos, tb + 6u);
-        uint sb = 12u * h.prim;
+        uint sb = 12u * gi;
         float3 n0 = vec3At(triShade, sb);
         float3 n1 = vec3At(triShade, sb + 3u);
         float3 n2 = vec3At(triShade, sb + 6u);
@@ -527,11 +597,21 @@ Surface fetchSurface(Hit h, float3 o, float3 d)
         float w1 = h.bary.x;
         float w2 = h.bary.y;
         float w0 = 1.0 - w1 - w2;
-        float3 ng = cross(v1 - v0, v2 - v0);
         float3 nn = normalize(w0 * n0 + w1 * n1 + w2 * n2);
+        float3 ng;
+        if (ident)
+            ng = cross(v1 - v0, v2 - v0);
+        else
+        {
+            // like the CPU backend, orient by the winding of the world
+            // space triangle; a mirroring transform reverses the winding
+            ng = cross(toWorld(info, v1) - toWorld(info, v0),
+                       toWorld(info, v2) - toWorld(info, v0));
+            nn = normalize(rotate(info, nn));
+            if ((info.flags & 2u) != 0u)
+                nn = -nn;
+        }
         s.n = dot(ng, d) > 0.0 ? -nn : nn;
-        s.p = w0 * v0 + w1 * v1 + w2 * v2;
-        s.p = o + h.t * d; // the ray point matches the CPU backend
         ownColor = (flags & 3u) != 0u;
         if ((flags & 1u) != 0u)
         {

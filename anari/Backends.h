@@ -21,6 +21,13 @@ struct BackendChoice
 
 std::unique_ptr<SceneBackend> createCpuBackend();
 
+// Starts initializing a GPU backend in the background (called when the device
+// parameter is committed) so that the first frame only waits for the
+// remainder; waitForBackendPrefetch() blocks until that is done (device
+// teardown).
+void prefetchBackend(const std::string &preference);
+void waitForBackendPrefetch();
+
 // 'preference': auto | cpu | vulkan. Never fails: falls back to the CPU
 // backend (with a warning when a GPU backend was requested or broke).
 BackendChoice createBackend(const std::string &preference);

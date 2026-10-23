@@ -4,6 +4,7 @@
 
 #include "TachyonDevice.h"
 
+#include "Backends.h"
 #include "Camera.h"
 #include "Frame.h"
 #include "Geometry.h"
@@ -271,6 +272,7 @@ TachyonDevice::~TachyonDevice()
 {
   auto &state = *deviceState();
   state.commitBuffer.clear();
+  waitForBackendPrefetch();
   reportMessage(ANARI_SEVERITY_DEBUG, "destroying tachyon device (%p)", this);
 }
 
@@ -290,6 +292,7 @@ void TachyonDevice::initDevice()
     state.numThreads = std::atoi(env);
 
   m_initialized = true;
+  prefetchBackend(state.backend); // overlaps with the application's scene setup
 }
 
 void TachyonDevice::deviceCommitParameters()
@@ -305,6 +308,10 @@ void TachyonDevice::deviceCommitParameters()
     backend = "auto";
   }
   deviceState()->backend = backend;
+  // (not from the constructor: the default is not what the application
+  // asked for yet; initDevice() handles the common case)
+  if (m_initialized)
+    prefetchBackend(backend);
 }
 
 #define TACHYON_STRINGIFY(s) TACHYON_STRINGIFY2(s)

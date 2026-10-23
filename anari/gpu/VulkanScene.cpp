@@ -3,8 +3,6 @@
 
 #include "VulkanScene.h"
 
-#include "shaders/raytrace.spv.h"
-
 #include <algorithm>
 #include <chrono>
 #include <cmath>
@@ -75,9 +73,11 @@ enum
   BIND_DEPTH = 15,
   BIND_ACCUM = 16,
   BIND_AABBS = 17,
-  BIND_FRAME = 18,
-  NUM_BINDINGS = 19
+  BIND_INSTANCES = 18,
+  BIND_FRAME = 19,
+  NUM_BINDINGS = 20
 };
+static_assert(NUM_BINDINGS == kNumBindings, "descriptor layout");
 
 double nowMs()
 {
@@ -100,6 +100,8 @@ void memoryBarrier(VkCommandBuffer cb,
 
 void check(VkResult r, const char *what)
 {
+  if (r == VK_ERROR_OUT_OF_DEVICE_MEMORY || r == VK_ERROR_OUT_OF_HOST_MEMORY)
+    throw std::runtime_error(std::string(what) + ": out of memory");
   if (r != VK_SUCCESS)
     throw std::runtime_error(
         std::string(what) + " failed (" + std::to_string(int(r)) + ")");
@@ -124,6 +126,41 @@ void normalize3(const float *a, float *o)
   o[2] = a[2] * s;
 }
 
+float bitsToFloat(uint32_t u)
+{
+  float f;
+  std::memcpy(&f, &u, 4);
+  return f;
+}
+
+// The CPU backend's normal handling (TachyonScene::addTriangle): flat faces
+// use the geometric normal, interpolated normals are made to agree with the
+// winding.
+void triangleNormals(const float *p, const float *n, bool forceFlat, float *out)
+{
+  const float e1[3] = {p[3] - p[0], p[4] - p[1], p[5] - p[2]};
+  const float e2[3] = {p[6] - p[0], p[7] - p[1], p[8] - p[2]};
+  const float gx = e1[1] * e2[2] - e1[2] * e2[1];
+  const float gy = e1[2] * e2[0] - e1[0] * e2[2];
+  const float gz = e1[0] * e2[1] - e1[1] * e2[0];
+  if (!n || forceFlat) {
+    const float len = std::sqrt(gx * gx + gy * gy + gz * gz);
+    const float s = len > 0.f ? 1.f / len : 0.f;
+    for (int i = 0; i < 3; i++) {
+      out[3 * i + 0] = gx * s;
+      out[3 * i + 1] = gy * s;
+      out[3 * i + 2] = gz * s;
+    }
+    return;
+  }
+  float d = 0.f;
+  for (int i = 0; i < 3; i++)
+    d += n[3 * i] * gx + n[3 * i + 1] * gy + n[3 * i + 2] * gz;
+  const float sign = d < 0.f ? -1.f : 1.f;
+  for (int i = 0; i < 9; i++)
+    out[i] = sign * n[i];
+}
+
 } // namespace
 
 std::unique_ptr<VulkanScene> VulkanScene::create(
@@ -143,6 +180,9 @@ VulkanScene::VulkanScene(std::shared_ptr<VulkanContext> ctx)
   m_debug = dbg && *dbg && *dbg != '0';
   const char *acc = std::getenv("TACHYON_VULKAN_ACCUM");
   m_accumEnabled = !(acc && *acc == '0');
+  if (const char *r = std::getenv("TACHYON_VULKAN_REFITS"))
+    m_maxRefits = unsigned(std::max(0, std::atoi(r)));
+  m_protos.emplace_back();
   createPipelines();
 }
 
@@ -157,65 +197,14 @@ VulkanScene::~VulkanScene()
   m_ctx->destroyBuffer(m_lightBuf);
   if (m_descPool)
     vkDestroyDescriptorPool(dev, m_descPool, nullptr);
-  if (m_aabbPipe)
-    vkDestroyPipeline(dev, m_aabbPipe, nullptr);
-  if (m_tracePipe)
-    vkDestroyPipeline(dev, m_tracePipe, nullptr);
-  if (m_pipeLayout)
-    vkDestroyPipelineLayout(dev, m_pipeLayout, nullptr);
-  if (m_setLayout)
-    vkDestroyDescriptorSetLayout(dev, m_setLayout, nullptr);
-  if (m_module)
-    vkDestroyShaderModule(dev, m_module, nullptr);
 }
 
 void VulkanScene::createPipelines()
 {
   VkDevice dev = m_ctx->device();
-
-  VkShaderModuleCreateInfo smi{VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO};
-  smi.codeSize = size_t(kRaytraceSpvSize);
-  smi.pCode = reinterpret_cast<const uint32_t *>(kRaytraceSpv);
-  check(vkCreateShaderModule(dev, &smi, nullptr, &m_module), "vkCreateShaderModule");
-
-  VkDescriptorSetLayoutBinding bind[NUM_BINDINGS]{};
-  for (uint32_t i = 0; i < NUM_BINDINGS; i++) {
-    bind[i].binding = i;
-    bind[i].descriptorType = i == BIND_AS ? VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR
-        : i == BIND_FRAME                 ? VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER
-                                          : VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-    bind[i].descriptorCount = 1;
-    bind[i].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
-  }
-  VkDescriptorSetLayoutCreateInfo dsl{
-      VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
-  dsl.bindingCount = NUM_BINDINGS;
-  dsl.pBindings = bind;
-  check(vkCreateDescriptorSetLayout(dev, &dsl, nullptr, &m_setLayout),
-      "vkCreateDescriptorSetLayout");
-
-  VkPipelineLayoutCreateInfo pli{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
-  pli.setLayoutCount = 1;
-  pli.pSetLayouts = &m_setLayout;
-  check(vkCreatePipelineLayout(dev, &pli, nullptr, &m_pipeLayout),
-      "vkCreatePipelineLayout");
-
-  const char *names[2] = {"genAabbs", "main"};
-  VkPipeline *pipes[2] = {&m_aabbPipe, &m_tracePipe};
-  for (int i = 0; i < 2; i++) {
-    VkComputePipelineCreateInfo ci{VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO};
-    ci.stage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
-    ci.stage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
-    ci.stage.module = m_module;
-    ci.stage.pName = names[i];
-    ci.layout = m_pipeLayout;
-    check(vkCreateComputePipelines(dev, VK_NULL_HANDLE, 1, &ci, nullptr, pipes[i]),
-        "vkCreateComputePipelines");
-  }
-
   VkDescriptorPoolSize sizes[3] = {
       {VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR, 1},
-      {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 17},
+      {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, NUM_BINDINGS - 2},
       {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1}};
   VkDescriptorPoolCreateInfo dpi{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
   dpi.maxSets = 1;
@@ -223,10 +212,11 @@ void VulkanScene::createPipelines()
   dpi.pPoolSizes = sizes;
   check(vkCreateDescriptorPool(dev, &dpi, nullptr, &m_descPool),
       "vkCreateDescriptorPool");
+  VkDescriptorSetLayout layout = m_ctx->setLayout();
   VkDescriptorSetAllocateInfo dai{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
   dai.descriptorPool = m_descPool;
   dai.descriptorSetCount = 1;
-  dai.pSetLayouts = &m_setLayout;
+  dai.pSetLayouts = &layout;
   check(vkAllocateDescriptorSets(dev, &dai, &m_set), "vkAllocateDescriptorSets");
 
   m_dummy = m_ctx->createBuffer(
@@ -250,14 +240,16 @@ void VulkanScene::destroyScene()
     vkDestroyAccelerationStructureKHR(dev, m_tlas, nullptr);
   m_tlas = VK_NULL_HANDLE;
   m_ctx->destroyBuffer(m_tlasBuf);
-  destroyBlas(m_blasSphere);
-  destroyBlas(m_blasCyl);
-  destroyBlas(m_blasTri);
+  for (auto &b : m_blas)
+    destroyBlas(b);
+  m_blas.clear();
   for (auto &b : m_buf)
     m_ctx->destroyBuffer(b);
   m_ctx->destroyBuffer(m_lightBuf);
   m_lightCapacity = 0;
-  m_counts[0] = m_counts[1] = m_counts[2] = 0;
+  m_haveSig = false;
+  m_updatable = false;
+  m_refits = 0;
   m_descDirty = true;
 }
 
@@ -290,24 +282,15 @@ std::vector<std::string> VulkanScene::takeWarnings()
 
 // Scene description ///////////////////////////////////////////////////////////
 
+// The GPU scene of the previous build stays alive: finishBuild() decides
+// whether it can be refitted.
 void VulkanScene::reset(bool lit, int)
 {
-  vkDeviceWaitIdle(m_ctx->device());
-  destroyScene();
   m_styles.clear();
-  std::vector<float>().swap(m_spheres);
-  std::vector<float>().swap(m_sphereColors);
-  std::vector<uint32_t>().swap(m_sphereStyles);
-  m_sphereRuns.clear();
-  m_sphereColorsActive = m_sphereStylesActive = false;
-  std::vector<float>().swap(m_cyls);
-  std::vector<float>().swap(m_cylColors);
-  std::vector<uint32_t>().swap(m_cylStyles);
-  m_cylRuns.clear();
-  m_cylColorsActive = m_cylStylesActive = false;
-  std::vector<float>().swap(m_triPos);
-  std::vector<float>().swap(m_triShade);
-  std::vector<float>().swap(m_triAux);
+  m_protos.clear();
+  m_protos.emplace_back();
+  m_cur = 0;
+  m_placements.clear();
   m_samplerIds.clear();
   m_samplers.clear();
   m_lights.clear();
@@ -349,61 +332,49 @@ void VulkanScene::addPointLight(const float *position, const float *rgb)
   m_lights.push_back(l);
 }
 
-// Triangles ///////////////////////////////////////////////////////////////////
-
-namespace {
-// The CPU backend's normal handling (TachyonScene::addTriangle): flat faces
-// use the geometric normal, interpolated normals are made to agree with the
-// winding.
-void triangleNormals(const float *p, const float *n, bool forceFlat, float *out)
+int VulkanScene::beginPrototype()
 {
-  const float e1[3] = {p[3] - p[0], p[4] - p[1], p[5] - p[2]};
-  const float e2[3] = {p[6] - p[0], p[7] - p[1], p[8] - p[2]};
-  const float gx = e1[1] * e2[2] - e1[2] * e2[1];
-  const float gy = e1[2] * e2[0] - e1[0] * e2[2];
-  const float gz = e1[0] * e2[1] - e1[1] * e2[0];
-  if (!n || forceFlat) {
-    const float len = std::sqrt(gx * gx + gy * gy + gz * gz);
-    const float s = len > 0.f ? 1.f / len : 0.f;
-    for (int i = 0; i < 3; i++) {
-      out[3 * i + 0] = gx * s;
-      out[3 * i + 1] = gy * s;
-      out[3 * i + 2] = gz * s;
-    }
+  m_protos.emplace_back();
+  m_cur = m_protos.size() - 1;
+  return int(m_cur);
+}
+
+void VulkanScene::endPrototype()
+{
+  m_cur = 0;
+}
+
+void VulkanScene::addInstance(int prototype, const float *x)
+{
+  if (prototype <= 0 || size_t(prototype) >= m_protos.size())
     return;
-  }
-  float d = 0.f;
-  for (int i = 0; i < 3; i++)
-    d += n[3 * i] * gx + n[3 * i + 1] * gy + n[3 * i + 2] * gz;
-  const float sign = d < 0.f ? -1.f : 1.f;
-  for (int i = 0; i < 9; i++)
-    out[i] = sign * n[i];
+  Placement pl;
+  pl.proto = prototype;
+  for (int r = 0; r < 3; r++)
+    for (int c = 0; c < 4; c++)
+      pl.m[4 * r + c] = x[4 * c + r]; // column major 4x4 to row major 3x4
+  m_placements.push_back(pl);
 }
 
-float bitsToFloat(uint32_t u)
-{
-  float f;
-  std::memcpy(&f, &u, 4);
-  return f;
-}
-} // namespace
+// Triangles ///////////////////////////////////////////////////////////////////
 
 void VulkanScene::addTriangle(
     int style, const float *p, const float *n, const float *c)
 {
+  Proto &pr = m_protos[m_cur];
   float nn[9];
   triangleNormals(p, n, c && !n, nn);
   uint32_t flags = 0;
-  uint32_t aux = uint32_t(m_triAux.size());
+  uint32_t aux = uint32_t(pr.triAux.size());
   if (c) {
     flags |= 1;
-    m_triAux.insert(m_triAux.end(), c, c + 9);
+    pr.triAux.insert(pr.triAux.end(), c, c + 9);
   }
-  m_triPos.insert(m_triPos.end(), p, p + 9);
-  m_triShade.insert(m_triShade.end(), nn, nn + 9);
-  m_triShade.push_back(bitsToFloat(uint32_t(style)));
-  m_triShade.push_back(bitsToFloat(flags));
-  m_triShade.push_back(bitsToFloat(aux));
+  pr.triPos.insert(pr.triPos.end(), p, p + 9);
+  pr.triShade.insert(pr.triShade.end(), nn, nn + 9);
+  pr.triShade.push_back(bitsToFloat(uint32_t(style)));
+  pr.triShade.push_back(bitsToFloat(flags));
+  pr.triShade.push_back(bitsToFloat(aux));
   m_numTriangles++;
 }
 
@@ -423,6 +394,7 @@ void VulkanScene::addSampledTriangle(int style,
     addTriangle(style, p, n, nullptr);
     return;
   }
+  Proto &pr = m_protos[m_cur];
   auto it = m_samplerIds.find(user);
   int sid;
   if (it == m_samplerIds.end()) {
@@ -435,39 +407,48 @@ void VulkanScene::addSampledTriangle(int style,
   float nn[9];
   triangleNormals(p, n, false, nn);
   const uint32_t flags = 2u | (uint32_t(sid) << 8);
-  const uint32_t aux = uint32_t(m_triAux.size());
-  m_triAux.insert(m_triAux.end(), vertexAttr, vertexAttr + 12);
-  m_triPos.insert(m_triPos.end(), p, p + 9);
-  m_triShade.insert(m_triShade.end(), nn, nn + 9);
-  m_triShade.push_back(bitsToFloat(uint32_t(style)));
-  m_triShade.push_back(bitsToFloat(flags));
-  m_triShade.push_back(bitsToFloat(aux));
+  const uint32_t aux = uint32_t(pr.triAux.size());
+  pr.triAux.insert(pr.triAux.end(), vertexAttr, vertexAttr + 12);
+  pr.triPos.insert(pr.triPos.end(), p, p + 9);
+  pr.triShade.insert(pr.triShade.end(), nn, nn + 9);
+  pr.triShade.push_back(bitsToFloat(uint32_t(style)));
+  pr.triShade.push_back(bitsToFloat(flags));
+  pr.triShade.push_back(bitsToFloat(aux));
   m_numTriangles++;
 }
 
 // Spheres /////////////////////////////////////////////////////////////////////
 
-void VulkanScene::ensureSphereColors()
+// Colors / styles are only stored per primitive when they are not all the
+// same; these fill the arrays from the runs added so far.
+void VulkanScene::ensureColors(Proto &p, bool sphere)
 {
-  if (m_sphereColorsActive)
+  bool &active = sphere ? p.sphereColorsActive : p.cylColorsActive;
+  if (active)
     return;
-  m_sphereColorsActive = true;
-  m_sphereColors.reserve(m_spheres.capacity() / 4 * 3);
-  for (const auto &run : m_sphereRuns) {
+  active = true;
+  const std::vector<Run> &runs = sphere ? p.sphereRuns : p.cylRuns;
+  std::vector<float> &col = sphere ? p.sphereColors : p.cylColors;
+  for (const auto &run : runs) {
     const float *c = m_styles[run.style].color;
-    for (size_t i = 0; i < run.count; i++)
-      m_sphereColors.insert(m_sphereColors.end(), c, c + 3);
+    for (size_t i = 0; i < run.count; i++) {
+      col.insert(col.end(), c, c + 3);
+      if (!sphere)
+        col.insert(col.end(), c, c + 3);
+    }
   }
 }
 
-void VulkanScene::ensureSphereStyles()
+void VulkanScene::ensureStyles(Proto &p, bool sphere)
 {
-  if (m_sphereStylesActive)
+  bool &active = sphere ? p.sphereStylesActive : p.cylStylesActive;
+  if (active)
     return;
-  m_sphereStylesActive = true;
-  m_sphereStyles.reserve(m_spheres.capacity() / 4);
-  for (const auto &run : m_sphereRuns)
-    m_sphereStyles.insert(m_sphereStyles.end(), run.count, uint32_t(run.style));
+  active = true;
+  const std::vector<Run> &runs = sphere ? p.sphereRuns : p.cylRuns;
+  std::vector<uint32_t> &sty = sphere ? p.sphereStyles : p.cylStyles;
+  for (const auto &run : runs)
+    sty.insert(sty.end(), run.count, uint32_t(run.style));
 }
 
 void VulkanScene::addSphere(
@@ -485,62 +466,40 @@ void VulkanScene::addSpheres(int style,
 {
   if (count == 0)
     return;
+  Proto &p = m_protos[m_cur];
   const float *styleColor = m_styles[style].color;
-  if (m_spheres.empty())
-    m_sphereStyle0 = style;
-  else if (!m_sphereStylesActive && style != m_sphereStyle0)
-    ensureSphereStyles(); // spheres of different styles
+  if (p.spheres.empty())
+    p.sphereStyle0 = style;
+  else if (!p.sphereStylesActive && style != p.sphereStyle0)
+    ensureStyles(p, true); // spheres of different styles
   if (rgb)
-    ensureSphereColors();
+    ensureColors(p, true);
 
-  m_spheres.reserve(m_spheres.size() + 4 * count);
-  if (m_sphereColorsActive)
-    m_sphereColors.reserve(m_sphereColors.size() + 3 * count);
+  p.spheres.reserve(p.spheres.size() + 4 * count);
+  if (p.sphereColorsActive)
+    p.sphereColors.reserve(p.sphereColors.size() + 3 * count);
   size_t kept = 0;
   for (size_t i = 0; i < count; i++) {
     const float r = radius ? radius[i] : uniformRadius;
     if (!(r > 0.f))
       continue;
-    m_spheres.push_back(center[3 * i]);
-    m_spheres.push_back(center[3 * i + 1]);
-    m_spheres.push_back(center[3 * i + 2]);
-    m_spheres.push_back(r);
-    if (m_sphereColorsActive) {
+    p.spheres.push_back(center[3 * i]);
+    p.spheres.push_back(center[3 * i + 1]);
+    p.spheres.push_back(center[3 * i + 2]);
+    p.spheres.push_back(r);
+    if (p.sphereColorsActive) {
       const float *c = rgb ? rgb + 3 * i : styleColor;
-      m_sphereColors.insert(m_sphereColors.end(), c, c + 3);
+      p.sphereColors.insert(p.sphereColors.end(), c, c + 3);
     }
     kept++;
   }
-  if (m_sphereStylesActive)
-    m_sphereStyles.insert(m_sphereStyles.end(), kept, uint32_t(style));
-  m_sphereRuns.push_back({kept, style});
+  if (p.sphereStylesActive)
+    p.sphereStyles.insert(p.sphereStyles.end(), kept, uint32_t(style));
+  p.sphereRuns.push_back({kept, style});
   m_numSpheres += kept;
 }
 
 // Cylinders ///////////////////////////////////////////////////////////////////
-
-void VulkanScene::ensureCylColors()
-{
-  if (m_cylColorsActive)
-    return;
-  m_cylColorsActive = true;
-  for (const auto &run : m_cylRuns) {
-    const float *c = m_styles[run.style].color;
-    for (size_t i = 0; i < run.count; i++) {
-      m_cylColors.insert(m_cylColors.end(), c, c + 3);
-      m_cylColors.insert(m_cylColors.end(), c, c + 3);
-    }
-  }
-}
-
-void VulkanScene::ensureCylStyles()
-{
-  if (m_cylStylesActive)
-    return;
-  m_cylStylesActive = true;
-  for (const auto &run : m_cylRuns)
-    m_cylStyles.insert(m_cylStyles.end(), run.count, uint32_t(run.style));
-}
 
 void VulkanScene::addCylinder(int style,
     const float *p0,
@@ -553,30 +512,31 @@ void VulkanScene::addCylinder(int style,
   const float ax = p1[0] - p0[0], ay = p1[1] - p0[1], az = p1[2] - p0[2];
   if (!(ax * ax + ay * ay + az * az > 0.f))
     return; // degenerate
-  if (m_cyls.empty())
-    m_cylStyle0 = style;
-  else if (!m_cylStylesActive && style != m_cylStyle0)
-    ensureCylStyles();
+  Proto &p = m_protos[m_cur];
+  if (p.cyls.empty())
+    p.cylStyle0 = style;
+  else if (!p.cylStylesActive && style != p.cylStyle0)
+    ensureStyles(p, false);
   // CPU rule: split into two colored halves only when both colors are given
   // and differ; otherwise the first color (or the style color) is used
   const float *c0 = rgb0 ? rgb0 : (rgb1 ? rgb1 : nullptr);
   const bool split = rgb0 && rgb1
       && (rgb0[0] != rgb1[0] || rgb0[1] != rgb1[1] || rgb0[2] != rgb1[2]);
   if (c0)
-    ensureCylColors();
+    ensureColors(p, false);
 
-  m_cyls.insert(m_cyls.end(), {p0[0], p0[1], p0[2], radius});
-  m_cyls.insert(
-      m_cyls.end(), {p1[0], p1[1], p1[2], bitsToFloat(uint32_t(caps & 3))});
-  if (m_cylColorsActive) {
+  p.cyls.insert(p.cyls.end(), {p0[0], p0[1], p0[2], radius});
+  p.cyls.insert(
+      p.cyls.end(), {p1[0], p1[1], p1[2], bitsToFloat(uint32_t(caps & 3))});
+  if (p.cylColorsActive) {
     const float *a = c0 ? c0 : m_styles[style].color;
     const float *b = split ? rgb1 : a;
-    m_cylColors.insert(m_cylColors.end(), a, a + 3);
-    m_cylColors.insert(m_cylColors.end(), b, b + 3);
+    p.cylColors.insert(p.cylColors.end(), a, a + 3);
+    p.cylColors.insert(p.cylColors.end(), b, b + 3);
   }
-  if (m_cylStylesActive)
-    m_cylStyles.push_back(uint32_t(style));
-  m_cylRuns.push_back({1, style});
+  if (p.cylStylesActive)
+    p.cylStyles.push_back(uint32_t(style));
+  p.cylRuns.push_back({1, style});
   m_numCylinders++;
 }
 
@@ -619,17 +579,25 @@ GpuBuffer VulkanScene::deviceBuffer(
   return b;
 }
 
+void VulkanScene::putBuffer(
+    int binding, const void *data, size_t bytes, VkBufferUsageFlags usage)
+{
+  if (m_buf[binding])
+    upload(m_buf[binding], data, bytes);
+  else
+    m_buf[binding] = deviceBuffer(data, bytes, usage);
+}
+
 void VulkanScene::updateDescriptors()
 {
   VkDevice dev = m_ctx->device();
   const GpuBuffer *src[NUM_BINDINGS] = {};
-  for (int i = BIND_SPHERES; i <= BIND_LIGHTS; i++)
+  for (int i = BIND_SPHERES; i < NUM_BINDINGS; i++)
     src[i] = &m_buf[i];
   src[BIND_LIGHTS] = &m_lightBuf;
   src[BIND_OUT] = &m_outBuf;
   src[BIND_DEPTH] = &m_depthBuf;
   src[BIND_ACCUM] = &m_accumBuf;
-  src[BIND_AABBS] = &m_buf[BIND_AABBS];
   src[BIND_FRAME] = &m_frameUbo;
 
   VkDescriptorBufferInfo infos[NUM_BINDINGS];
@@ -672,19 +640,24 @@ void VulkanScene::generateAabbs(uint32_t set, uint32_t count, GpuBuffer &aabbs)
   fd.counts[0] = set == 0 ? count : 0;
   fd.counts[1] = set == 1 ? count : 0;
   fd.flags[3] = set;
+  // 2D dispatch: one dimension is limited to 65535 groups
+  const uint32_t groups = (count + 63) / 64;
+  const uint32_t gx = std::min<uint32_t>(groups, 65535);
+  const uint32_t gy = (groups + gx - 1) / gx;
+  fd.styles[2] = gx * 64; // threads per row
   std::memcpy(m_frameUbo.mapped, &fd, sizeof(fd));
   m_ctx->syncMapped(m_frameUbo, true);
   m_ctx->submitAndWait([&](VkCommandBuffer cb) {
-    vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, m_aabbPipe);
+    vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, m_ctx->aabbPipeline());
     vkCmdBindDescriptorSets(cb,
         VK_PIPELINE_BIND_POINT_COMPUTE,
-        m_pipeLayout,
+        m_ctx->pipelineLayout(),
         0,
         1,
         &m_set,
         0,
         nullptr);
-    vkCmdDispatch(cb, (count + 63) / 64, 1, 1);
+    vkCmdDispatch(cb, gx, gy, 1);
     memoryBarrier(cb,
         VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
         VK_ACCESS_SHADER_WRITE_BIT,
@@ -696,7 +669,9 @@ void VulkanScene::generateAabbs(uint32_t set, uint32_t count, GpuBuffer &aabbs)
 }
 
 VulkanScene::Blas VulkanScene::buildBlas(
-    const VkAccelerationStructureGeometryKHR &geomIn, uint32_t prims)
+    const VkAccelerationStructureGeometryKHR &geomIn,
+    uint32_t prims,
+    bool updatable)
 {
   VkDevice dev = m_ctx->device();
   VkAccelerationStructureGeometryKHR geom = geomIn;
@@ -704,7 +679,8 @@ VulkanScene::Blas VulkanScene::buildBlas(
       VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR};
   bgi.type = VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR;
   bgi.flags = VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT_KHR
-      | VK_BUILD_ACCELERATION_STRUCTURE_ALLOW_COMPACTION_BIT_KHR;
+      | VK_BUILD_ACCELERATION_STRUCTURE_ALLOW_COMPACTION_BIT_KHR
+      | (updatable ? VK_BUILD_ACCELERATION_STRUCTURE_ALLOW_UPDATE_BIT_KHR : 0);
   bgi.mode = VK_BUILD_ACCELERATION_STRUCTURE_MODE_BUILD_KHR;
   bgi.geometryCount = 1;
   bgi.pGeometries = &geom;
@@ -788,12 +764,14 @@ VulkanScene::Blas VulkanScene::buildBlas(
         VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_DEVICE_ADDRESS_INFO_KHR};
     dai.accelerationStructure = out.as;
     out.address = vkGetAccelerationStructureDeviceAddressKHR(dev, &dai);
+    out.updateScratch = sz.updateScratchSize;
     if (m_debug)
       std::fprintf(stderr,
-          "[tachyon vulkan]   BLAS %u prims: %.1f -> %.1f MB\n",
+          "[tachyon vulkan]   BLAS %u prims: %.1f -> %.1f MB%s\n",
           prims,
           double(sz.accelerationStructureSize) / 1048576.0,
-          double(compact) / 1048576.0);
+          double(compact) / 1048576.0,
+          updatable ? " (updatable)" : "");
   } catch (...) {
     vkDeviceWaitIdle(dev);
     if (bigAs)
@@ -812,25 +790,76 @@ VulkanScene::Blas VulkanScene::buildBlas(
   return out;
 }
 
-void VulkanScene::buildTlas(const Blas *blas, const uint32_t *types, int count)
+// Refit: rebuild the tree bottom up for new primitive positions, keeping its
+// topology (fast, the quality degrades with large motion)
+void VulkanScene::updateBlas(Blas &blas,
+    const VkAccelerationStructureGeometryKHR &geomIn,
+    uint32_t prims)
+{
+  VkAccelerationStructureGeometryKHR geom = geomIn;
+  VkAccelerationStructureBuildGeometryInfoKHR bgi{
+      VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR};
+  bgi.type = VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR;
+  bgi.flags = VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT_KHR
+      | VK_BUILD_ACCELERATION_STRUCTURE_ALLOW_COMPACTION_BIT_KHR
+      | VK_BUILD_ACCELERATION_STRUCTURE_ALLOW_UPDATE_BIT_KHR;
+  bgi.mode = VK_BUILD_ACCELERATION_STRUCTURE_MODE_UPDATE_KHR;
+  bgi.srcAccelerationStructure = blas.as;
+  bgi.dstAccelerationStructure = blas.as;
+  bgi.geometryCount = 1;
+  bgi.pGeometries = &geom;
+  const VkDeviceSize align = m_ctx->scratchAlignment();
+  GpuBuffer scratch = m_ctx->createBuffer(blas.updateScratch + align,
+      VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+      MemoryKind::DeviceLocal);
+  bgi.scratchData.deviceAddress = (scratch.address + align - 1) / align * align;
+  VkAccelerationStructureBuildRangeInfoKHR range{prims, 0, 0, 0};
+  const VkAccelerationStructureBuildRangeInfoKHR *pRange = &range;
+  try {
+    m_ctx->submitAndWait([&](VkCommandBuffer cb) {
+      vkCmdBuildAccelerationStructuresKHR(cb, 1, &bgi, &pRange);
+      memoryBarrier(cb,
+          VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR,
+          VK_ACCESS_ACCELERATION_STRUCTURE_WRITE_BIT_KHR,
+          VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR,
+          VK_ACCESS_ACCELERATION_STRUCTURE_READ_BIT_KHR);
+    });
+  } catch (...) {
+    m_ctx->destroyBuffer(scratch);
+    throw;
+  }
+  m_ctx->destroyBuffer(scratch);
+}
+
+void VulkanScene::buildTlas(const Gathered &g)
 {
   VkDevice dev = m_ctx->device();
-  VkAccelerationStructureInstanceKHR inst[3]{};
-  for (int i = 0; i < count; i++) {
-    inst[i].transform.matrix[0][0] = inst[i].transform.matrix[1][1] =
-        inst[i].transform.matrix[2][2] = 1.f;
-    inst[i].instanceCustomIndex = types[i];
-    inst[i].mask = 0xFF;
-    inst[i].flags = VK_GEOMETRY_INSTANCE_TRIANGLE_FACING_CULL_DISABLE_BIT_KHR;
-    inst[i].accelerationStructureReference = blas[i].address;
+  if (m_tlas)
+    vkDestroyAccelerationStructureKHR(dev, m_tlas, nullptr);
+  m_tlas = VK_NULL_HANDLE;
+  m_ctx->destroyBuffer(m_tlasBuf);
+
+  const uint32_t count = uint32_t(g.instances.size());
+  std::vector<VkAccelerationStructureInstanceKHR> inst(count);
+  for (uint32_t i = 0; i < count; i++) {
+    const InstanceEntry &e = g.instances[i];
+    VkAccelerationStructureInstanceKHR &o = inst[i];
+    std::memset(&o, 0, sizeof(o));
+    for (int r = 0; r < 3; r++)
+      for (int c = 0; c < 4; c++)
+        o.transform.matrix[r][c] = e.m[4 * r + c];
+    o.instanceCustomIndex = i; // index of the record in the instance table
+    o.mask = 0xFF;
+    o.flags = VK_GEOMETRY_INSTANCE_TRIANGLE_FACING_CULL_DISABLE_BIT_KHR;
+    o.accelerationStructureReference = m_blas[size_t(e.slice)].address;
   }
   const VkDeviceSize align = m_ctx->scratchAlignment();
-  GpuBuffer instances = m_ctx->createBuffer(sizeof(inst),
+  GpuBuffer instances = m_ctx->createBuffer(sizeof(inst[0]) * count,
       VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR,
       MemoryKind::Upload);
   GpuBuffer scratch;
   try {
-    std::memcpy(instances.mapped, inst, sizeof(inst));
+    std::memcpy(instances.mapped, inst.data(), sizeof(inst[0]) * count);
     m_ctx->syncMapped(instances, true);
 
     VkAccelerationStructureGeometryKHR tg{
@@ -847,11 +876,10 @@ void VulkanScene::buildTlas(const Blas *blas, const uint32_t *types, int count)
     tbi.mode = VK_BUILD_ACCELERATION_STRUCTURE_MODE_BUILD_KHR;
     tbi.geometryCount = 1;
     tbi.pGeometries = &tg;
-    const uint32_t n = uint32_t(count);
     VkAccelerationStructureBuildSizesInfoKHR tsz{
         VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_SIZES_INFO_KHR};
     vkGetAccelerationStructureBuildSizesKHR(
-        dev, VK_ACCELERATION_STRUCTURE_BUILD_TYPE_DEVICE_KHR, &tbi, &n, &tsz);
+        dev, VK_ACCELERATION_STRUCTURE_BUILD_TYPE_DEVICE_KHR, &tbi, &count, &tsz);
     scratch = m_ctx->createBuffer(tsz.buildScratchSize + align,
         VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
         MemoryKind::DeviceLocal);
@@ -867,7 +895,7 @@ void VulkanScene::buildTlas(const Blas *blas, const uint32_t *types, int count)
     check(vkCreateAccelerationStructureKHR(dev, &tci, nullptr, &m_tlas),
         "vkCreateAccelerationStructureKHR");
     tbi.dstAccelerationStructure = m_tlas;
-    VkAccelerationStructureBuildRangeInfoKHR range{n, 0, 0, 0};
+    VkAccelerationStructureBuildRangeInfoKHR range{count, 0, 0, 0};
     const VkAccelerationStructureBuildRangeInfoKHR *pRange = &range;
     m_ctx->submitAndWait([&](VkCommandBuffer cb) {
       vkCmdBuildAccelerationStructuresKHR(cb, 1, &tbi, &pRange);
@@ -884,207 +912,365 @@ void VulkanScene::buildTlas(const Blas *blas, const uint32_t *types, int count)
   }
   m_ctx->destroyBuffer(scratch);
   m_ctx->destroyBuffer(instances);
+  m_descDirty = true;
 }
 
-void VulkanScene::finishBuild()
+// Brings the host description into its final layout: the arrays of all
+// prototypes one after the other, one BLAS "slice" per prototype and type, one
+// instance entry per placement and slice.
+VulkanScene::Gathered VulkanScene::gather()
 {
-  const size_t nSph = m_spheres.size() / 4;
-  const size_t nCyl = m_cyls.size() / 8;
-  const size_t nTri = m_triPos.size() / 9;
-  if (nSph + nCyl + nTri == 0)
-    return;
-  const double t0 = nowMs();
-  m_ctx->resetPeak();
+  Gathered g;
+  const size_t np = m_protos.size();
+
+  // do all prototypes keep per primitive colors / styles?
+  bool colS = false, styS = false, colC = false, styC = false;
+  int s0 = -1, c0 = -1;
+  for (const Proto &p : m_protos) {
+    if (!p.spheres.empty()) {
+      colS |= p.sphereColorsActive;
+      if (s0 < 0)
+        s0 = p.sphereStyle0;
+      styS |= p.sphereStylesActive || p.sphereStyle0 != s0;
+    }
+    if (!p.cyls.empty()) {
+      colC |= p.cylColorsActive;
+      if (c0 < 0)
+        c0 = p.cylStyle0;
+      styC |= p.cylStylesActive || p.cylStyle0 != c0;
+    }
+  }
+  g.styleUniform[0] = uint32_t(std::max(s0, 0));
+  g.styleUniform[1] = uint32_t(std::max(c0, 0));
+  if (colS)
+    g.flags |= F_SPHERE_COLORS;
+  if (styS)
+    g.flags |= F_SPHERE_STYLES;
+  if (colC)
+    g.flags |= F_CYL_COLORS;
+  if (styC)
+    g.flags |= F_CYL_STYLES;
+
+  std::vector<std::vector<int>> sliceOf(np, std::vector<int>(3, -1));
+  uint32_t baseS = 0, baseC = 0, baseT = 0;
+  uint32_t auxBase = 0;
+  for (size_t pi = 0; pi < np; pi++) {
+    Proto &p = m_protos[pi];
+    const uint32_t ns = uint32_t(p.spheres.size() / 4);
+    const uint32_t nc = uint32_t(p.cyls.size() / 8);
+    const uint32_t nt = uint32_t(p.triPos.size() / 9);
+    if (colS && ns)
+      ensureColors(p, true);
+    if (styS && ns)
+      ensureStyles(p, true);
+    if (colC && nc)
+      ensureColors(p, false);
+    if (styC && nc)
+      ensureStyles(p, false);
+    const bool single = np == 1;
+    auto append = [&](auto &dst, auto &src) {
+      if (single)
+        dst = std::move(src);
+      else
+        dst.insert(dst.end(), src.begin(), src.end());
+    };
+    if (ns) {
+      sliceOf[pi][0] = int(g.slices.size());
+      g.slices.push_back({int(pi), 0, baseS, ns});
+      baseS += ns;
+      append(g.spheres, p.spheres);
+      if (colS)
+        append(g.sphereColors, p.sphereColors);
+      if (styS)
+        append(g.sphereStyles, p.sphereStyles);
+    }
+    if (nc) {
+      sliceOf[pi][1] = int(g.slices.size());
+      g.slices.push_back({int(pi), 1, baseC, nc});
+      baseC += nc;
+      append(g.cyls, p.cyls);
+      if (colC)
+        append(g.cylColors, p.cylColors);
+      if (styC)
+        append(g.cylStyles, p.cylStyles);
+    }
+    if (nt) {
+      sliceOf[pi][2] = int(g.slices.size());
+      g.slices.push_back({int(pi), 2, baseT, nt});
+      baseT += nt;
+      const size_t first = g.triShade.size();
+      append(g.triPos, p.triPos);
+      append(g.triShade, p.triShade);
+      if (auxBase && !single) {
+        // attribute offsets are relative to the prototype's own array
+        for (uint32_t t = 0; t < nt; t++) {
+          float *rec = &g.triShade[first + 12 * size_t(t)];
+          uint32_t flags, aux;
+          std::memcpy(&flags, rec + 10, 4);
+          std::memcpy(&aux, rec + 11, 4);
+          if (flags & 3u) {
+            aux += auxBase;
+            std::memcpy(rec + 11, &aux, 4);
+          }
+        }
+      }
+      auxBase += uint32_t(p.triAux.size());
+      append(g.triAux, p.triAux);
+    }
+  }
+  g.nSph = baseS;
+  g.nCyl = baseC;
+  g.nTri = baseT;
+
+  // style table: (color, opacity), (diffuse, phong, phong exponent, metal)
+  for (const auto &s : m_styles) {
+    g.styles.insert(g.styles.end(), {s.color[0], s.color[1], s.color[2], s.opacity});
+    g.styles.insert(g.styles.end(), {s.diffuse, s.phong, s.phongExp, s.metal ? 1.f : 0.f});
+  }
+  if (g.styles.empty())
+    g.styles.assign(8, 1.f);
+
+  // sampler table + texels
+  for (const auto &d : m_samplers) {
+    const uint32_t texelBase = uint32_t(g.texels.size() / 4);
+    const uint32_t hdr0[4] = {uint32_t(d.dims),
+        uint32_t(d.size[0]),
+        uint32_t(d.size[1]),
+        uint32_t(d.size[2])};
+    const uint32_t hdr1[4] = {uint32_t(d.wrap[0]),
+        uint32_t(d.wrap[1]),
+        uint32_t(d.wrap[2]),
+        d.linear ? 1u : 0u};
+    const uint32_t hdr2[4] = {texelBase, 0, 0, 0};
+    for (int k = 0; k < 4; k++)
+      g.samplerTable.push_back(bitsToFloat(hdr0[k]));
+    for (int k = 0; k < 4; k++)
+      g.samplerTable.push_back(bitsToFloat(hdr1[k]));
+    for (int k = 0; k < 4; k++)
+      g.samplerTable.push_back(bitsToFloat(hdr2[k]));
+    g.samplerTable.insert(g.samplerTable.end(), d.inTransform, d.inTransform + 16);
+    g.samplerTable.insert(g.samplerTable.end(), d.inOffset, d.inOffset + 4);
+    g.samplerTable.insert(g.samplerTable.end(), d.outTransform, d.outTransform + 16);
+    g.samplerTable.insert(g.samplerTable.end(), d.outOffset, d.outOffset + 4);
+    g.texels.insert(g.texels.end(), d.texels.begin(), d.texels.end());
+  }
+
+  // instances: the scene itself once, then every placement of a prototype
+  auto addEntries = [&](size_t proto, const float *m) {
+    static const float ident[12] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0};
+    for (int t = 0; t < 3; t++) {
+      const int sl = sliceOf[proto][t];
+      if (sl < 0)
+        continue;
+      InstanceEntry e;
+      e.slice = sl;
+      e.flags = 0;
+      if (!m) {
+        std::memcpy(e.m, ident, sizeof(ident));
+        e.flags |= 1;
+      } else {
+        std::memcpy(e.m, m, sizeof(e.m));
+        if (std::memcmp(m, ident, sizeof(ident)) == 0)
+          e.flags |= 1;
+        const float det = m[0] * (m[5] * m[10] - m[6] * m[9])
+            - m[1] * (m[4] * m[10] - m[6] * m[8])
+            + m[2] * (m[4] * m[9] - m[5] * m[8]);
+        if (det < 0.f)
+          e.flags |= 2;
+      }
+      g.instances.push_back(e);
+    }
+  };
+  addEntries(0, nullptr);
+  for (const Placement &pl : m_placements)
+    addEntries(size_t(pl.proto), pl.m);
+
+  // instance records for the shader
+  for (const InstanceEntry &e : g.instances) {
+    const Slice &sl = g.slices[size_t(e.slice)];
+    g.instTable.push_back(bitsToFloat(uint32_t(sl.type)));
+    g.instTable.push_back(bitsToFloat(sl.base));
+    g.instTable.push_back(bitsToFloat(e.flags));
+    g.instTable.push_back(0.f);
+    g.instTable.insert(g.instTable.end(), e.m, e.m + 12);
+  }
+
+  // what a refit may not change
+  for (const Slice &s : g.slices) {
+    g.sig.layout.push_back(uint32_t(s.proto));
+    g.sig.layout.push_back(uint32_t(s.type));
+    g.sig.layout.push_back(s.count);
+  }
+  for (const InstanceEntry &e : g.instances)
+    g.sig.layout.push_back(uint32_t(e.slice));
+  g.sig.styles = g.styles;
+  g.sig.flags = g.flags;
+  g.sig.aux = g.triAux.size();
+  g.sig.texels = g.texels.size();
+  g.sig.samplers = m_samplers.size();
+  return g;
+}
+
+void VulkanScene::uploadSceneData(const Gathered &g)
+{
   const VkBufferUsageFlags ssbo = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
-  try {
-    // styles: (color, opacity), (diffuse, phong, phong exponent, metal)
-    {
-      std::vector<float> st;
-      for (const auto &s : m_styles) {
-        st.insert(st.end(), {s.color[0], s.color[1], s.color[2], s.opacity});
-        st.insert(st.end(),
-            {s.diffuse, s.phong, s.phongExp, s.metal ? 1.f : 0.f});
-      }
-      if (st.empty())
-        st.assign(8, 1.f);
-      m_buf[BIND_STYLES] = deviceBuffer(st.data(), 4 * st.size(), ssbo);
-    }
+  putBuffer(BIND_STYLES, g.styles.data(), 4 * g.styles.size(), ssbo);
+  putBuffer(BIND_INSTANCES, g.instTable.data(), 4 * g.instTable.size(), ssbo);
+  if (!g.samplerTable.empty()) {
+    putBuffer(BIND_SAMPLERS, g.samplerTable.data(), 4 * g.samplerTable.size(), ssbo);
+    const float zero[4] = {0, 0, 0, 0};
+    putBuffer(BIND_TEXELS,
+        g.texels.empty() ? zero : g.texels.data(),
+        g.texels.empty() ? 16 : 4 * g.texels.size(),
+        ssbo);
+  }
+  if (g.nSph) {
+    putBuffer(BIND_SPHERES, g.spheres.data(), 16 * size_t(g.nSph), ssbo);
+    if (g.flags & F_SPHERE_COLORS)
+      putBuffer(BIND_SPHERE_COLORS, g.sphereColors.data(), 12 * size_t(g.nSph), ssbo);
+    if (g.flags & F_SPHERE_STYLES)
+      putBuffer(BIND_SPHERE_STYLES, g.sphereStyles.data(), 4 * size_t(g.nSph), ssbo);
+  }
+  if (g.nCyl) {
+    putBuffer(BIND_CYLS, g.cyls.data(), 32 * size_t(g.nCyl), ssbo);
+    if (g.flags & F_CYL_COLORS)
+      putBuffer(BIND_CYL_COLORS, g.cylColors.data(), 24 * size_t(g.nCyl), ssbo);
+    if (g.flags & F_CYL_STYLES)
+      putBuffer(BIND_CYL_STYLES, g.cylStyles.data(), 4 * size_t(g.nCyl), ssbo);
+  }
+  if (g.nTri) {
+    putBuffer(BIND_TRI_POS,
+        g.triPos.data(),
+        36 * size_t(g.nTri),
+        ssbo | VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR);
+    putBuffer(BIND_TRI_SHADE, g.triShade.data(), 48 * size_t(g.nTri), ssbo);
+    if (!g.triAux.empty())
+      putBuffer(BIND_TRI_AUX, g.triAux.data(), 4 * g.triAux.size(), ssbo);
+  }
+  m_descDirty = true;
+}
 
-    // sampler table + texels
-    if (!m_samplers.empty()) {
-      std::vector<float> table, texels;
-      for (const auto &d : m_samplers) {
-        const uint32_t texelBase = uint32_t(texels.size() / 4);
-        const uint32_t hdr0[4] = {uint32_t(d.dims),
-            uint32_t(d.size[0]),
-            uint32_t(d.size[1]),
-            uint32_t(d.size[2])};
-        const uint32_t hdr1[4] = {uint32_t(d.wrap[0]),
-            uint32_t(d.wrap[1]),
-            uint32_t(d.wrap[2]),
-            d.linear ? 1u : 0u};
-        const uint32_t hdr2[4] = {texelBase, 0, 0, 0};
-        for (int k = 0; k < 4; k++)
-          table.push_back(bitsToFloat(hdr0[k]));
-        for (int k = 0; k < 4; k++)
-          table.push_back(bitsToFloat(hdr1[k]));
-        for (int k = 0; k < 4; k++)
-          table.push_back(bitsToFloat(hdr2[k]));
-        table.insert(table.end(), d.inTransform, d.inTransform + 16);
-        table.insert(table.end(), d.inOffset, d.inOffset + 4);
-        table.insert(table.end(), d.outTransform, d.outTransform + 16);
-        table.insert(table.end(), d.outOffset, d.outOffset + 4);
-        texels.insert(texels.end(), d.texels.begin(), d.texels.end());
-      }
-      if (texels.empty())
-        texels.assign(4, 0.f);
-      m_buf[BIND_SAMPLERS] = deviceBuffer(table.data(), 4 * table.size(), ssbo);
-      m_buf[BIND_TEXELS] = deviceBuffer(texels.data(), 4 * texels.size(), ssbo);
-    }
+static VkAccelerationStructureGeometryKHR aabbGeometry(VkDeviceAddress addr)
+{
+  VkAccelerationStructureGeometryKHR g{
+      VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_KHR};
+  g.geometryType = VK_GEOMETRY_TYPE_AABBS_KHR;
+  g.flags = VK_GEOMETRY_OPAQUE_BIT_KHR;
+  g.geometry.aabbs.sType =
+      VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_AABBS_DATA_KHR;
+  g.geometry.aabbs.data.deviceAddress = addr;
+  g.geometry.aabbs.stride = 24;
+  return g;
+}
 
-    uint32_t flagBits = 0;
-    Blas blas[3];
-    uint32_t types[3];
-    int numBlas = 0;
-    const VkBufferUsageFlags aabbUsage = ssbo
-        | VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR;
+static VkAccelerationStructureGeometryKHR triangleGeometry(
+    VkDeviceAddress addr, uint32_t count)
+{
+  VkAccelerationStructureGeometryKHR g{
+      VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_KHR};
+  g.geometryType = VK_GEOMETRY_TYPE_TRIANGLES_KHR;
+  g.flags = VK_GEOMETRY_OPAQUE_BIT_KHR;
+  g.geometry.triangles.sType =
+      VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_TRIANGLES_DATA_KHR;
+  g.geometry.triangles.vertexFormat = VK_FORMAT_R32G32B32_SFLOAT;
+  g.geometry.triangles.vertexData.deviceAddress = addr;
+  g.geometry.triangles.vertexStride = 12;
+  g.geometry.triangles.maxVertex = 3 * count - 1;
+  g.geometry.triangles.indexType = VK_INDEX_TYPE_NONE_KHR;
+  return g;
+}
 
-    if (nSph) {
-      m_buf[BIND_SPHERES] = deviceBuffer(m_spheres.data(), 16 * nSph, ssbo);
-      if (m_sphereColorsActive) {
-        m_buf[BIND_SPHERE_COLORS] =
-            deviceBuffer(m_sphereColors.data(), 12 * nSph, ssbo);
-        flagBits |= F_SPHERE_COLORS;
-      }
-      if (m_sphereStylesActive) {
-        m_buf[BIND_SPHERE_STYLES] =
-            deviceBuffer(m_sphereStyles.data(), 4 * nSph, ssbo);
-        flagBits |= F_SPHERE_STYLES;
-      }
-      m_styleUniform[0] = uint32_t(m_sphereStyle0);
-      std::vector<float>().swap(m_spheres);
-      std::vector<float>().swap(m_sphereColors);
-      std::vector<uint32_t>().swap(m_sphereStyles);
-    }
-    if (nCyl) {
-      m_buf[BIND_CYLS] = deviceBuffer(m_cyls.data(), 32 * nCyl, ssbo);
-      if (m_cylColorsActive) {
-        m_buf[BIND_CYL_COLORS] =
-            deviceBuffer(m_cylColors.data(), 24 * nCyl, ssbo);
-        flagBits |= F_CYL_COLORS;
-      }
-      if (m_cylStylesActive) {
-        m_buf[BIND_CYL_STYLES] = deviceBuffer(m_cylStyles.data(), 4 * nCyl, ssbo);
-        flagBits |= F_CYL_STYLES;
-      }
-      m_styleUniform[1] = uint32_t(m_cylStyle0);
-      std::vector<float>().swap(m_cyls);
-      std::vector<float>().swap(m_cylColors);
-      std::vector<uint32_t>().swap(m_cylStyles);
-    }
-    if (nTri) {
-      m_buf[BIND_TRI_POS] = deviceBuffer(m_triPos.data(),
-          36 * nTri,
-          ssbo | VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR);
-      m_buf[BIND_TRI_SHADE] = deviceBuffer(m_triShade.data(), 48 * nTri, ssbo);
-      if (!m_triAux.empty())
-        m_buf[BIND_TRI_AUX] =
-            deviceBuffer(m_triAux.data(), 4 * m_triAux.size(), ssbo);
-      std::vector<float>().swap(m_triShade);
-      std::vector<float>().swap(m_triAux);
-    }
-    m_descDirty = true;
-
+// Builds (or with 'refitOnly' updates) the BLAS of every slice
+void VulkanScene::buildSlices(const Gathered &g, bool updatable, bool refitOnly)
+{
+  const VkBufferUsageFlags aabbUsage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT
+      | VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR;
+  if (!refitOnly)
+    m_blas.assign(g.slices.size(), Blas());
+  for (int type = 0; type < 2; type++) {
+    const uint32_t total = type == 0 ? g.nSph : g.nCyl;
+    if (!total)
+      continue;
+    GpuBuffer aabbs = m_ctx->createBuffer(24 * size_t(total), aabbUsage, MemoryKind::DeviceLocal);
     try {
-      if (nSph) {
-        GpuBuffer aabbs = m_ctx->createBuffer(24 * nSph, aabbUsage, MemoryKind::DeviceLocal);
-        try {
-          generateAabbs(0, uint32_t(nSph), aabbs);
-          VkAccelerationStructureGeometryKHR g{
-              VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_KHR};
-          g.geometryType = VK_GEOMETRY_TYPE_AABBS_KHR;
-          g.flags = VK_GEOMETRY_OPAQUE_BIT_KHR;
-          g.geometry.aabbs.sType =
-              VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_AABBS_DATA_KHR;
-          g.geometry.aabbs.data.deviceAddress = aabbs.address;
-          g.geometry.aabbs.stride = 24;
-          blas[numBlas] = buildBlas(g, uint32_t(nSph));
-        } catch (...) {
-          m_ctx->destroyBuffer(aabbs);
-          throw;
-        }
-        m_ctx->destroyBuffer(aabbs);
-        types[numBlas++] = 0;
-        m_blasSphere = blas[numBlas - 1];
+      generateAabbs(uint32_t(type), total, aabbs);
+      for (size_t i = 0; i < g.slices.size(); i++) {
+        const Slice &s = g.slices[i];
+        if (s.type != type)
+          continue;
+        const auto geom = aabbGeometry(aabbs.address + 24 * VkDeviceAddress(s.base));
+        if (refitOnly)
+          updateBlas(m_blas[i], geom, s.count);
+        else
+          m_blas[i] = buildBlas(geom, s.count, updatable);
       }
-      if (nCyl) {
-        GpuBuffer aabbs = m_ctx->createBuffer(24 * nCyl, aabbUsage, MemoryKind::DeviceLocal);
-        try {
-          generateAabbs(1, uint32_t(nCyl), aabbs);
-          VkAccelerationStructureGeometryKHR g{
-              VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_KHR};
-          g.geometryType = VK_GEOMETRY_TYPE_AABBS_KHR;
-          g.flags = VK_GEOMETRY_OPAQUE_BIT_KHR;
-          g.geometry.aabbs.sType =
-              VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_AABBS_DATA_KHR;
-          g.geometry.aabbs.data.deviceAddress = aabbs.address;
-          g.geometry.aabbs.stride = 24;
-          blas[numBlas] = buildBlas(g, uint32_t(nCyl));
-        } catch (...) {
-          m_ctx->destroyBuffer(aabbs);
-          throw;
-        }
-        m_ctx->destroyBuffer(aabbs);
-        types[numBlas++] = 1;
-        m_blasCyl = blas[numBlas - 1];
-      }
-      if (nTri) {
-        VkAccelerationStructureGeometryKHR g{
-            VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_KHR};
-        g.geometryType = VK_GEOMETRY_TYPE_TRIANGLES_KHR;
-        g.flags = VK_GEOMETRY_OPAQUE_BIT_KHR;
-        g.geometry.triangles.sType =
-            VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_TRIANGLES_DATA_KHR;
-        g.geometry.triangles.vertexFormat = VK_FORMAT_R32G32B32_SFLOAT;
-        g.geometry.triangles.vertexData.deviceAddress = m_buf[BIND_TRI_POS].address;
-        g.geometry.triangles.vertexStride = 12;
-        g.geometry.triangles.maxVertex = uint32_t(3 * nTri - 1);
-        g.geometry.triangles.indexType = VK_INDEX_TYPE_NONE_KHR;
-        blas[numBlas] = buildBlas(g, uint32_t(nTri));
-        types[numBlas++] = 2;
-        m_blasTri = blas[numBlas - 1];
-      }
-      buildTlas(blas, types, numBlas);
     } catch (...) {
+      m_ctx->destroyBuffer(aabbs);
       throw;
     }
-    std::vector<float>().swap(m_triPos);
+    m_ctx->destroyBuffer(aabbs);
+  }
+  for (size_t i = 0; i < g.slices.size(); i++) {
+    const Slice &s = g.slices[i];
+    if (s.type != 2)
+      continue;
+    const auto geom = triangleGeometry(
+        m_buf[BIND_TRI_POS].address + 36 * VkDeviceAddress(s.base), s.count);
+    if (refitOnly)
+      updateBlas(m_blas[i], geom, s.count);
+    else
+      m_blas[i] = buildBlas(geom, s.count, updatable);
+  }
+}
 
-    m_counts[0] = uint32_t(nSph);
-    m_counts[1] = uint32_t(nCyl);
-    m_counts[2] = uint32_t(nTri);
-    m_sceneFlags = flagBits;
-    m_descDirty = true;
+void VulkanScene::ensureLightBuffer()
+{
+  const size_t need = std::max<size_t>(m_lights.size(), 1);
+  if (m_lightBuf && m_lightCapacity >= need)
+    return;
+  m_ctx->destroyBuffer(m_lightBuf);
+  m_lightCapacity = need;
+  // rewritten every frame: the unlit headlight follows the camera
+  m_lightBuf = m_ctx->createBuffer(
+      32 * need, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, MemoryKind::Upload);
+  m_descDirty = true;
+}
+
+void VulkanScene::buildFull(Gathered &g, bool updatable)
+{
+  const double t0 = nowMs();
+  m_ctx->resetPeak();
+  destroyScene();
+  try {
+    uploadSceneData(g);
+    const double t1 = nowMs();
+    buildSlices(g, updatable, false);
+    buildTlas(g);
+    m_updatable = updatable;
+    m_sceneFlags = g.flags;
+    m_styleUniform[0] = g.styleUniform[0];
+    m_styleUniform[1] = g.styleUniform[1];
+    m_sig = g.sig;
+    m_haveSig = true;
+    m_refits = 0;
     m_lastFrameHash = 0;
     m_sameFrames = 0;
-
-    // lights (rewritten every frame: the unlit headlight follows the camera)
-    m_lightCapacity = std::max<size_t>(m_lights.size(), 1);
-    m_lightBuf = m_ctx->createBuffer(32 * m_lightCapacity,
-        VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
-        MemoryKind::Upload);
-
     if (m_debug) {
       std::fprintf(stderr,
-          "[tachyon vulkan] scene: %zu spheres, %zu cylinders, %zu triangles, "
-          "%zu styles, %zu samplers, %zu lights; built in %.1f ms\n",
-          nSph,
-          nCyl,
-          nTri,
+          "[tachyon vulkan] build: %u spheres, %u cylinders, %u triangles in "
+          "%zu BLAS, %zu TLAS instances, %zu styles, %zu samplers, %zu "
+          "lights: upload %.1f ms, acceleration structures %.1f ms%s\n",
+          g.nSph,
+          g.nCyl,
+          g.nTri,
+          g.slices.size(),
+          g.instances.size(),
           m_styles.size(),
           m_samplers.size(),
           m_lights.size(),
-          nowMs() - t0);
+          t1 - t0,
+          nowMs() - t1,
+          updatable ? " (updatable)" : "");
       std::fprintf(stderr,
           "[tachyon vulkan] GPU memory resident %.1f MB, peak while building "
           "%.1f MB\n",
@@ -1096,6 +1282,51 @@ void VulkanScene::finishBuild()
     destroyScene();
     throw;
   }
+}
+
+void VulkanScene::refit(Gathered &g)
+{
+  const double t0 = nowMs();
+  uploadSceneData(g);
+  const double t1 = nowMs();
+  buildSlices(g, true, true);
+  buildTlas(g);
+  m_refits++;
+  m_lastFrameHash = 0;
+  m_sameFrames = 0;
+  if (m_debug)
+    std::fprintf(stderr,
+        "[tachyon vulkan] refit %u: upload %.1f ms, BLAS update + TLAS %.1f ms\n",
+        m_refits,
+        t1 - t0,
+        nowMs() - t1);
+}
+
+void VulkanScene::finishBuild()
+{
+  Gathered g = gather();
+  m_placements.clear();
+  if (g.nSph + g.nCyl + g.nTri == 0) {
+    destroyScene();
+    return;
+  }
+  const bool same = m_tlas && m_haveSig && g.sig == m_sig;
+  try {
+    if (same && m_updatable && m_refits < m_maxRefits) {
+      refit(g);
+    } else {
+      // The second build with the same topology in a row: the scene is
+      // being animated, so make the structures refittable from now on. Also
+      // after the maximum number of refits (refitting degrades the quality).
+      const bool animate = same || (m_haveSig && m_updatable);
+      buildFull(g, animate);
+    }
+  } catch (...) {
+    vkDeviceWaitIdle(m_ctx->device());
+    destroyScene();
+    throw;
+  }
+  ensureLightBuffer();
 }
 
 // Frame ///////////////////////////////////////////////////////////////////////
@@ -1232,9 +1463,6 @@ void VulkanScene::render()
   fd.upV0[3] += 0.5f * fd.shade[2];
   fd.size[0] = uint32_t(m_width);
   fd.size[1] = uint32_t(m_height);
-  fd.counts[0] = m_counts[0];
-  fd.counts[1] = m_counts[1];
-  fd.counts[2] = m_counts[2];
   fd.flags[0] = m_sceneFlags | ((m_lit || m_transparent) ? F_SHADOWS : 0u)
       | (m_transparent ? F_TRANSPARENT : 0u)
       | (wantDepth ? F_DEPTH : 0u) | (m_bg[3] < 1.f ? F_BG_ALPHA : 0u);
@@ -1339,10 +1567,10 @@ void VulkanScene::render()
   }
 
   m_ctx->submitAndWait([&](VkCommandBuffer cb) {
-    vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, m_tracePipe);
+    vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, m_ctx->tracePipeline());
     vkCmdBindDescriptorSets(cb,
         VK_PIPELINE_BIND_POINT_COMPUTE,
-        m_pipeLayout,
+        m_ctx->pipelineLayout(),
         0,
         1,
         &m_set,
