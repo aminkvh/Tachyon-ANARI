@@ -1,5 +1,5 @@
 // Copyright 2021-2026 The Khronos Group
-// Copyright (c) 2026 Tachyon-dev contributors (adapted from the helide device)
+// Copyright (c) 2026 Tachyon-ANARI contributors (adapted from the helide device)
 // SPDX-License-Identifier: Apache-2.0
 
 #include "Frame.h"

@@ -1,4 +1,4 @@
-// Copyright (c) 2026 Tachyon-dev contributors
+// Copyright (c) 2026 Tachyon-ANARI contributors
 // SPDX-License-Identifier: Apache-2.0
 
 #include "Light.h"

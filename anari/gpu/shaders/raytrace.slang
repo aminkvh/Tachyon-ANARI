@@ -1,4 +1,4 @@
-// Copyright (c) 2026 Tachyon-dev contributors
+// Copyright (c) 2026 Tachyon-ANARI contributors
 // SPDX-License-Identifier: Apache-2.0
 
 // Shaders of the GPU backends. Compiled by slangc (see anari/CMakeLists.txt

@@ -13,7 +13,7 @@
 #   - spaceball.c/glwin.c interactive OpenGL fly-through mode, replaced by
 #     stub_spaceball.c since it's unreachable from the headless CLI path
 #
-# Usage: run from the Tachyon-dev repo root (git bash / MSYS):
+# Usage: run from the Tachyon-ANARI repo root (git bash / MSYS):
 #   sh build_win/build.sh [extra CFLAGS...]
 # e.g. sh build_win/build.sh -DNDEBUG
 

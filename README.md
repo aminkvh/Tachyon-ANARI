@@ -10,7 +10,7 @@ This fork is an optimized build of Tachyon with an added [Khronos ANARI](https:/
 - **ANARI device:** lets ANARI applications (for example VTK/ParaView and VisIt) render with Tachyon in memory. It supports triangles, spheres and cylinders, materials, textures, lights and shadows.
 - **GPU ray tracing:** Vulkan on Windows and Linux, and Metal on macOS (experimental). It falls back to the CPU automatically when no ray-tracing GPU is available.
 
-Prebuilt binaries are on the [Releases](https://github.com/aminkvh/Tachyon-dev/releases) page.
+Prebuilt binaries are on the [Releases](https://github.com/aminkvh/Tachyon-ANARI/releases) page.
 
 ## Build
 
