@@ -421,6 +421,10 @@ GpuBuffer VulkanContext::createBuffer(
     type = findMemoryType(req.memoryTypeBits, hv | cached, dl);
     if (type == ~0u)
       type = findMemoryType(req.memoryTypeBits, hv, dl);
+    // unified-memory devices (lavapipe, integrated GPUs) only expose
+    // host-visible memory that is also device-local
+    if (type == ~0u)
+      type = findMemoryType(req.memoryTypeBits, hv, 0);
     break;
   }
   if (type == ~0u) {
