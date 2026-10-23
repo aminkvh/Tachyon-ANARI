@@ -209,6 +209,7 @@ jobs:
           Fork of John Stone's Tachyon 0.99b6, now also available as a Khronos ANARI rendering device.
 
           New in this release:
+          - ANARI device: image1D/2D/3D, transform and primitive samplers (per-hit on triangles, per-primitive on spheres and cylinders); instance bounds now use the transformed group bounding box. In eye-light mode all 148 runnable ANARI CTS cases pass against a reference with two helide fixes (cylinder caps, sampler offsets); against stock helide references 140 pass, the 8 failures being those helide bugs.
           - ANARI device: images were offset by one pixel (pixels were sampled at their corner, not their center); fixed.
           - ANARI device: renderer parameter `mode` = `eyeLight` adds a fast preview mode that ignores scene lights. With it, 91 of 97 runnable ANARI conformance (CTS) cases pass; the other 6 are 4 cylinder-cap cases where the reference device ignores `caps`, 1 bounds-dependent framing case, and 1 sampler case (samplers are not supported yet).
           - ANARI device: sphere and cylinder geometry. Large sphere sets are stored compactly with their own BVH; on a 1M-sphere scene the first frame takes about 0.16 s using 79 MB, comparable in time to the SDK's Embree-based reference device and with less memory.
