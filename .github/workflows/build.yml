@@ -210,7 +210,7 @@ jobs:
           dev_dir="$(cd build/anari && pwd)"
           export PATH="$sdk_bin:$dev_dir:$PATH"
           export DYLD_LIBRARY_PATH="$sdk_lib:$dev_dir${DYLD_LIBRARY_PATH:+:$DYLD_LIBRARY_PATH}"
-          export TACHYON_METAL_DEBUG=1
+          export TACHYON_DEBUG=1
           for be in metal auto; do
             mkdir -p "metal-$be"
             (
@@ -432,7 +432,7 @@ jobs:
           export PATH="$sdk_bin:$dev_dir:$PATH"
           export LD_LIBRARY_PATH="$sdk_lib:$dev_dir${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
           export TACHYON_BACKEND=vulkan
-          export TACHYON_VULKAN_DEBUG=1
+          export TACHYON_DEBUG=1
           echo "VK_ICD_FILENAMES=$VK_ICD_FILENAMES"
           mkdir -p render-out
           cd render-out
@@ -477,20 +477,11 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           gh release create "$GITHUB_REF_NAME" dist/*.tar.gz --repo "$GITHUB_REPOSITORY" --title "$GITHUB_REF_NAME" --notes-file - <<'EOF'
-          Fork of John Stone's Tachyon 0.99b6, now also available as a Khronos ANARI rendering device.
+          Optimized build of John Stone's Tachyon ray tracer with an added Khronos ANARI rendering device, for fast in-memory rendering on the CPU and GPU.
 
-          New in this release:
-          - ANARI device: GPU ray tracing. Device parameter `backend` = auto|cpu|vulkan|metal. Vulkan (Windows/Linux, NVIDIA RTX, AMD RDNA2+, Intel Arc): a 1M-sphere frame at 1080p takes about 4 ms on an RTX 3060 laptop GPU versus about 110 ms on the CPU; animated trajectories update by refitting instead of rebuilding; same ANARI conformance results as the CPU backend (148 of 148 in eye-light mode against corrected references). Metal (macOS, Apple Silicon) is experimental and untested on real hardware. Without a ray-tracing GPU the CPU backend is used.
-          - ANARI device: now advertises KHR_MATERIAL_PHYSICALLY_BASED (the extension name was misspelled, so it was never reported).
-          - ANARI device: image1D/2D/3D, transform and primitive samplers (per-hit on triangles, per-primitive on spheres and cylinders); instance bounds now use the transformed group bounding box. In eye-light mode all 148 runnable ANARI CTS cases pass against a reference with two helide fixes (cylinder caps, sampler offsets); against stock helide references 140 pass, the 8 failures being those helide bugs.
-          - ANARI device: images were offset by one pixel (pixels were sampled at their corner, not their center); fixed.
-          - ANARI device: renderer parameter `mode` = `eyeLight` adds a fast preview mode that ignores scene lights. With it, 91 of 97 runnable ANARI conformance (CTS) cases pass; the other 6 are 4 cylinder-cap cases where the reference device ignores `caps`, 1 bounds-dependent framing case, and 1 sampler case (samplers are not supported yet).
-          - ANARI device: sphere and cylinder geometry. Large sphere sets are stored compactly with their own BVH; on a 1M-sphere scene the first frame takes about 0.16 s using 79 MB, comparable in time to the SDK's Embree-based reference device and with less memory.
-          - ANARI device: material color, opacity, metallic and roughness can be driven by attributes. Opacity from per-vertex data is applied per triangle, not interpolated.
-          - Experimental ANARI device (`tachyon-anari-*` archives): triangles, spheres and cylinders, perspective and orthographic cameras, matte and approximate physically based materials, directional and point lights, color and depth output. It is a small CPU-only library that needs only the ANARI SDK 0.16 loader. Other geometry types are skipped with a warning.
-          - Windows: PPM/TGA image textures and volume data were read in text mode, which truncated them. Scenes using them now render correctly and identically on every run. Texture lookups no longer read outside the image.
+          - Command-line renderer (`tachyon-*` archives): faster rendering and scene loading, multithreaded by default.
+          - ANARI device (`tachyon-anari-*` archives): load with `anariLoadLibrary("tachyon", ...)` or `ANARI_LIBRARY=tachyon`. Supports triangles, spheres, cylinders, materials, textures, lights and shadows.
+          - GPU ray tracing through the device parameter `backend` (`auto`, `cpu`, `vulkan`, `metal`): Vulkan on Windows and Linux, Metal on macOS (experimental), with automatic fallback to the CPU.
 
-          From the previous release: Windows (MinGW) builds use all cores by default; rendering is about 1.3–1.4x faster on AO and lattice test scenes; scene parsing is about 7–10x faster on large triangle meshes.
-
-          Command-line binaries have no JPEG/PNG output (PPM/TGA/BMP/PSD/RGB are supported). The macOS builds are ARM64.
+          The macOS builds are ARM64. Command-line binaries write PPM, TGA, BMP, PSD and RGB images.
           EOF

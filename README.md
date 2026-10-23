@@ -2,51 +2,34 @@
 
 Tachyon is an efficient, parallelised raytracer, written by John Stone (http://www.ks.uiuc.edu/~johns/) for use in scientific visualisation applications. The current version is 0.99b6, released in 2013.
 
-This was uploaded to GitHub as the download link has been broken recently. The original package README is given below.
+This fork is an optimized build of Tachyon with an added [Khronos ANARI](https://www.khronos.org/anari) rendering device, for fast in-memory rendering on the CPU and GPU. All credit for Tachyon goes to John Stone; the original package README is given below.
 
-## About this fork
+## What's included
 
-All credit for Tachyon goes to John Stone. This fork adds performance work on top of 0.99b6:
+- **Faster CPU renderer:** quicker rendering and scene loading, multithreaded by default on Windows, Linux and macOS.
+- **ANARI device:** lets ANARI applications (for example VTK/ParaView and VisIt) render with Tachyon in memory. It supports triangles, spheres and cylinders, materials, textures, lights and shadows.
+- **GPU ray tracing:** Vulkan on Windows and Linux, and Metal on macOS (experimental). It falls back to the CPU automatically when no ray-tracing GPU is available.
 
-- **Windows/MinGW multithreading fix:** stock MinGW builds rendered on a single thread unless `-numthreads` was given, and now use all cores by default.
-- **Rendering:** flattened grid storage, cross-file inlining with LTO, precomputed cylinder/ring constants, and faster ambient-occlusion sampling. These give roughly 1.3–1.4× on the AO and lattice test scenes at the same thread count, and little change on sphere-heavy molecular scenes.
-- **Scene parsing:** the scene file is read into memory once and numbers are parsed with an exact fast path, about 7–10× faster on large triangle meshes.
-- **Opt-in options:** `-accel bvh` selects a BVH instead of the default grid. `-adaptive` stops antialiasing and AO sampling early (experimental and lossy). `-aosamples N` overrides the AO sample count.
+Prebuilt binaries are on the [Releases](https://github.com/aminkvh/Tachyon-dev/releases) page.
 
-Output is byte-identical to stock on the test scenes, except for ambient-occlusion scenes, whose noise pattern differs (statistically equivalent) because of the new sampler. Speedups were measured on one Windows machine; see the git history for details. Build on Windows (MSYS2/MinGW), Linux or macOS with `sh build_win/build.sh`, or download binaries from the Releases page.
+## Build
 
-## ANARI device (experimental)
+Command-line renderer (Windows with MSYS2/MinGW, Linux, macOS):
 
-Tachyon can also be used as a [Khronos ANARI](https://www.khronos.org/anari) rendering device, so ANARI applications can render with it. It is a small CPU-only library: about 0.6 MB on Linux, and it needs nothing beyond the ANARI SDK. It currently supports:
+```sh
+sh build_win/build.sh
+```
 
-- triangles, spheres and cylinders (large sphere sets are stored compactly with their own BVH)
-- perspective and orthographic cameras
-- `matte` materials, plus `physicallyBased` (approximated); color, opacity, metallic and roughness can come from attributes
-- image (1D, 2D, 3D), transform and primitive samplers for colors (colors are looked up for every hit on triangles; opacity, metallic and roughness are looked up once per primitive)
-- directional and point lights
-- color and depth output
-- a renderer `mode` parameter: `default` (scene lights and shadows) or `eyeLight` (fast preview that ignores lights)
-
-Other geometry types are skipped with a warning.
-
-Build it against [ANARI-SDK](https://github.com/KhronosGroup/ANARI-SDK) 0.16:
+ANARI device, against [ANARI-SDK](https://github.com/KhronosGroup/ANARI-SDK) 0.16:
 
 ```sh
 cmake -S . -B build -DTACHYON_BUILD_ANARI=ON -DCMAKE_PREFIX_PATH=<anari-sdk install>
 cmake --build build
 ```
 
-Load it from an application with `anariLoadLibrary("tachyon", ...)`, or set `ANARI_LIBRARY=tachyon` for tools that read that variable. Make sure the library directory is on the loader search path.
+## Use the ANARI device
 
-### GPU rendering
-
-The device can also render on the GPU with hardware ray tracing. Set the device parameter `backend` to `auto` (the default), `cpu`, `vulkan` or `metal`:
-
-- **Vulkan** (Windows, Linux): NVIDIA RTX, AMD RDNA2 or newer, and Intel Arc GPUs. On an RTX 3060 laptop GPU a 1M-sphere frame at 1080p takes about 4 ms, versus about 110 ms on the CPU.
-- **Metal** (macOS, Apple Silicon): experimental and not yet tested on real hardware.
-- `auto` uses the GPU when one with ray tracing is available and otherwise falls back to the CPU, which also happens if the GPU runs out of memory.
-
-GPU support adds no runtime dependencies: the Vulkan loader is opened at run time, and shaders are compiled into the library.
+Load it with `anariLoadLibrary("tachyon", ...)`, or set `ANARI_LIBRARY=tachyon` for applications that read that variable. The device parameter `backend` selects `auto` (default), `cpu`, `vulkan` or `metal`.
 
 ```$Id: README,v 1.28 2013/04/21 19:32:42 johns Exp $```
 

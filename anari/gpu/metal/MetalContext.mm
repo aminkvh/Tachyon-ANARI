@@ -5,11 +5,11 @@
 
 #import "MetalContext.h"
 
+#include "../../Backends.h"
 #include "../shaders/raytrace.metal.h"
 
 #include <chrono>
 #include <cstdio>
-#include <cstdlib>
 #include <future>
 #include <mutex>
 
@@ -72,15 +72,6 @@ id<MTLFunction> traceFunction(id<MTLLibrary> lib)
 }
 } // namespace
 
-bool metalDebug()
-{
-  static const bool on = []() {
-    const char *dbg = std::getenv("TACHYON_METAL_DEBUG");
-    return dbg && *dbg && *dbg != '0';
-  }();
-  return on;
-}
-
 MetalContext::~MetalContext() = default;
 
 bool MetalContext::init(std::string &reason, bool &hard)
@@ -92,7 +83,7 @@ bool MetalContext::init(std::string &reason, bool &hard)
       reason = "Metal ray tracing needs macOS 12 or newer";
       return false;
     }
-    const bool dbg = metalDebug();
+    const bool dbg = debugEnabled();
     id<MTLDevice> def = MTLCreateSystemDefaultDevice();
     NSArray<id<MTLDevice>> *all = MTLCopyAllDevices();
     id<MTLDevice> chosen = nil;
@@ -100,13 +91,6 @@ bool MetalContext::init(std::string &reason, bool &hard)
       chosen = def;
     std::string names;
     for (id<MTLDevice> d in all) {
-      if (dbg)
-        std::fprintf(stderr,
-            "[tachyon metal] device '%s': supportsRaytracing %s, unified "
-            "memory %s\n",
-            [d.name UTF8String],
-            d.supportsRaytracing ? "yes" : "no",
-            d.hasUnifiedMemory ? "yes" : "no");
       if (!names.empty())
         names += ", ";
       names += str(d.name);
@@ -182,15 +166,9 @@ bool MetalContext::init(std::string &reason, bool &hard)
       m_groupW = maxThreads > 0 ? maxThreads : 1;
     if (dbg)
       std::fprintf(stderr,
-          "[tachyon metal] using '%s' (unified memory %s): shader compiled in "
-          "%.0f ms, pipeline in %.0f ms, threadgroup %lux%lu (max %lu)\n",
-          m_gpuName.c_str(),
-          chosen.hasUnifiedMemory ? "yes" : "no",
+          "[tachyon metal] shader compiled in %.0f ms, pipeline in %.0f ms\n",
           tCompile,
-          msSince(t0) - tCompile,
-          (unsigned long)m_groupW,
-          (unsigned long)m_groupH,
-          (unsigned long)maxThreads);
+          msSince(t0) - tCompile);
     return true;
   }
 }
@@ -209,7 +187,7 @@ std::shared_ptr<MetalContext> MetalContext::acquire(
   std::shared_ptr<MetalContext> ctx(new MetalContext);
   const auto t0 = std::chrono::steady_clock::now();
   const bool ok = ctx->init(reason, hard);
-  if (metalDebug())
+  if (debugEnabled())
     std::fprintf(stderr,
         "[tachyon metal] context init %.0f ms%s%s\n",
         msSince(t0),

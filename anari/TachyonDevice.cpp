@@ -367,10 +367,6 @@ int TachyonDevice::deviceGetProperty(const char *name,
   } else if (prop == "tachyon" && type == ANARI_BOOL) {
     helium::writeToVoidP(mem, true);
     return 1;
-  } else if (prop == "tachyon.sceneBuilds" && type == ANARI_UINT64) {
-    // diagnostic: number of Tachyon scene (geometry + BVH) rebuilds so far
-    helium::writeToVoidP(mem, uint64_t(deviceState()->sceneBuilds.load()));
-    return 1;
   }
   return 0;
 }

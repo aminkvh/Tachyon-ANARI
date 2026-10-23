@@ -29,7 +29,6 @@ struct GpuBuffer
   VkDeviceAddress address{0};
   void *mapped{nullptr};
   bool hostCoherent{true};
-  bool deviceLocal{false};
   explicit operator bool() const { return buffer != VK_NULL_HANDLE; }
 };
 
@@ -78,10 +77,6 @@ class VulkanContext
   GpuBuffer createBuffer(
       VkDeviceSize size, VkBufferUsageFlags usage, MemoryKind kind);
   void destroyBuffer(GpuBuffer &b);
-  // bytes of device-local memory currently allocated / peak
-  size_t deviceBytes() const { return m_deviceBytes; }
-  size_t peakDeviceBytes() const { return m_peakDeviceBytes; }
-  void resetPeak() { m_peakDeviceBytes = m_deviceBytes; }
   // flush (host to device) or invalidate (device to host) a mapped buffer
   void syncMapped(GpuBuffer &b, bool toDevice);
 
@@ -123,11 +118,6 @@ class VulkanContext
   VkPhysicalDeviceMemoryProperties m_mem{};
   uint32_t m_scratchAlign{128};
   std::string m_gpuName;
-  size_t m_deviceBytes{0};
-  size_t m_peakDeviceBytes{0};
-  // test hooks (TACHYON_VULKAN_MEMORY_LIMIT_MB, TACHYON_VULKAN_FAKE_LOST)
-  size_t m_memoryLimit{0};
-  long m_fakeLostAfter{-1};
 };
 
 } // namespace gpu

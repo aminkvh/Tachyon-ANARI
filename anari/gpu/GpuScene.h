@@ -137,9 +137,7 @@ class GpuSceneBase : public SceneBackend
   std::vector<std::string> takeWarnings() override;
 
  protected:
-  // 'envPrefix' (e.g. "TACHYON_VULKAN"): the backend's environment variables
-  // <prefix>_DEBUG, <prefix>_ACCUM and <prefix>_REFITS
-  explicit GpuSceneBase(const char *envPrefix);
+  GpuSceneBase();
 
   struct Run
   {
@@ -266,7 +264,8 @@ class GpuSceneBase : public SceneBackend
   bool m_haveSig{false};
   bool m_updatable{false}; // the BLASes were built refittable
   unsigned m_refits{0};
-  unsigned m_maxRefits{100};
+  // refitting degrades the structure quality, so rebuild after this many
+  static constexpr unsigned m_maxRefits = 100;
 
   // per frame state
   float m_ambient{0.5f}, m_diffuse{0.5f};
@@ -277,7 +276,6 @@ class GpuSceneBase : public SceneBackend
   OutputFormat m_format{OutputFormat::None};
   void *m_colorDst{nullptr};
   float *m_depthDst{nullptr};
-  bool m_accumEnabled{true};
   uint64_t m_lastFrameHash{0};
   uint32_t m_sameFrames{0};
 
@@ -286,7 +284,6 @@ class GpuSceneBase : public SceneBackend
   bool m_transparent{false}; // a style has opacity < 1 (the CPU full shader)
   bool m_unsupported{false};
   bool m_debug{false};
-  std::string m_logTag; // "[tachyon vulkan]"
   unsigned m_warned{0};
   std::vector<std::string> m_warnings;
 

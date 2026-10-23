@@ -52,7 +52,7 @@ std::unique_ptr<VulkanScene> VulkanScene::create(
 }
 
 VulkanScene::VulkanScene(std::shared_ptr<VulkanContext> ctx)
-    : GpuSceneBase("TACHYON_VULKAN"), m_ctx(std::move(ctx))
+    : m_ctx(std::move(ctx))
 {
   createPipelines();
 }
@@ -361,13 +361,6 @@ VulkanScene::Blas VulkanScene::buildBlas(
     dai.accelerationStructure = out.as;
     out.address = vkGetAccelerationStructureDeviceAddressKHR(dev, &dai);
     out.updateScratch = sz.updateScratchSize;
-    if (m_debug)
-      std::fprintf(stderr,
-          "[tachyon vulkan]   BLAS %u prims: %.1f -> %.1f MB%s\n",
-          prims,
-          double(sz.accelerationStructureSize) / 1048576.0,
-          double(compact) / 1048576.0,
-          updatable ? " (updatable)" : "");
   } catch (...) {
     vkDeviceWaitIdle(dev);
     if (bigAs)
@@ -639,7 +632,6 @@ void VulkanScene::ensureLightBuffer()
 void VulkanScene::buildFull(Gathered &g, bool updatable)
 {
   const double t0 = nowMs();
-  m_ctx->resetPeak();
   destroyScene();
   try {
     uploadSceneData(g);
@@ -671,11 +663,6 @@ void VulkanScene::buildFull(Gathered &g, bool updatable)
           t1 - t0,
           nowMs() - t1,
           updatable ? " (updatable)" : "");
-      std::fprintf(stderr,
-          "[tachyon vulkan] GPU memory resident %.1f MB, peak while building "
-          "%.1f MB\n",
-          double(m_ctx->deviceBytes()) / 1048576.0,
-          double(m_ctx->peakDeviceBytes()) / 1048576.0);
     }
   } catch (...) {
     vkDeviceWaitIdle(m_ctx->device());
@@ -782,12 +769,6 @@ void VulkanScene::render()
     m_outFormat = fmt;
     m_outBytes = pixBytes;
     m_descDirty = true;
-    if (m_debug)
-      std::fprintf(stderr,
-          "[tachyon vulkan] output buffers %.1f MB, resident GPU memory now "
-          "%.1f MB\n",
-          double(m_outBuf.size + m_depthBuf.size + m_accumBuf.size) / 1048576.0,
-          double(m_ctx->deviceBytes()) / 1048576.0);
   }
   if (m_descDirty)
     updateDescriptors();

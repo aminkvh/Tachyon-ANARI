@@ -7,7 +7,6 @@
 // std
 #include <algorithm>
 #include <chrono>
-#include <cstdlib>
 #include <cstring>
 #include <exception>
 #include <stdexcept>
@@ -391,7 +390,7 @@ void Frame::rebuildScene(helium::TimeStamp sceneStamp)
   // instances (one acceleration structure however many placements); the
   // others get every placement baked into the geometry
   std::vector<char> placed(surfaces.size(), 0);
-  if (m_scene->supportsInstancing() && !std::getenv("TACHYON_NO_INSTANCING")) {
+  if (m_scene->supportsInstancing()) {
     std::vector<const Surface *> order;
     std::unordered_map<const Surface *, std::vector<size_t>> groups;
     for (size_t i = 0; i < surfaces.size(); i++) {
@@ -432,7 +431,6 @@ void Frame::rebuildScene(helium::TimeStamp sceneStamp)
   m_builtWorld = m_world.ptr;
   m_sceneValid = true;
   m_shadingDirty = true;
-  state->sceneBuilds++;
   reportMessage(ANARI_SEVERITY_DEBUG,
       "tachyon: rebuilt scene (%zu triangles, %zu spheres, %zu cylinders, "
       "%zu lights)",

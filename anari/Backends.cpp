@@ -11,9 +11,20 @@
 #include "gpu/metal/MetalScene.h"
 #endif
 
+#include <cstdio>
+#include <cstdlib>
 #include <exception>
 
 namespace tachyon_anari {
+
+bool debugEnabled()
+{
+  static const bool on = []() {
+    const char *dbg = std::getenv("TACHYON_DEBUG");
+    return dbg && *dbg && *dbg != '0';
+  }();
+  return on;
+}
 
 std::unique_ptr<SceneBackend> createCpuBackend()
 {
@@ -60,6 +71,8 @@ bool tryGpu(BackendChoice &c,
     if (c.scene) {
       c.gpu = true;
       c.info = std::string(api) + " backend on " + gpuName;
+      if (debugEnabled())
+        std::fprintf(stderr, "[tachyon] %s\n", c.info.c_str());
       return true;
     }
   } catch (const std::exception &e) {
@@ -103,6 +116,8 @@ BackendChoice createBackend(const std::string &preference)
   c.scene = createCpuBackend();
   c.gpu = false;
   c.info = note.empty() ? "CPU backend" : "CPU backend (" + note + ")";
+  if (debugEnabled())
+    std::fprintf(stderr, "[tachyon] %s\n", c.info.c_str());
   return c;
 }
 

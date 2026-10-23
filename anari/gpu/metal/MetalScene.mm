@@ -163,7 +163,7 @@ struct MetalScene::Impl
   // Builds an acceleration structure; primitive ones that are not refitted
   // later are compacted
   id<MTLAccelerationStructure> build(
-      MTLAccelerationStructureDescriptor *desc, bool compact, bool debug)
+      MTLAccelerationStructureDescriptor *desc, bool compact)
   {
     MTLAccelerationStructureSizes sz =
         [dev accelerationStructureSizesWithDescriptor:desc];
@@ -203,11 +203,6 @@ struct MetalScene::Impl
                            toAccelerationStructure:small];
           [enc endEncoding];
         });
-    if (debug)
-      std::fprintf(stderr,
-          "[tachyon metal]   acceleration structure %.1f -> %.1f MB\n",
-          mb(sz.accelerationStructureSize),
-          mb(compacted));
     asBytes += compacted;
     return small;
   }
@@ -253,7 +248,7 @@ void MetalScene::waitPrefetch()
 }
 
 MetalScene::MetalScene(std::shared_ptr<MetalContext> ctx)
-    : GpuSceneBase("TACHYON_METAL"), m(new Impl)
+    : m(new Impl)
 {
   m->ctx = std::move(ctx);
   m->dev = m->ctx->device();
@@ -343,7 +338,7 @@ void MetalScene::buildSlices(const Gathered &g, bool updatable, bool refitOnly)
     if (refitOnly)
       m->refit(m->blas[i], desc);
     else
-      m->blas[i] = m->build(desc, !updatable, m_debug);
+      m->blas[i] = m->build(desc, !updatable);
   };
   for (int type = 0; type < 2; type++) {
     const uint32_t total = type == 0 ? g.nSph : g.nCyl;
@@ -430,7 +425,7 @@ void MetalScene::buildTlas(const Gathered &g)
         sizeof(MTLAccelerationStructureUserIDInstanceDescriptor);
     desc.instanceDescriptorType =
         MTLAccelerationStructureInstanceDescriptorTypeUserID;
-    m->tlas = m->build(desc, false, false);
+    m->tlas = m->build(desc, false);
   }
 }
 
@@ -549,11 +544,6 @@ void MetalScene::render()
     m->outH = m_height;
     m->outDepth = wantDepth;
     m->outFormat = fmt;
-    if (m_debug)
-      std::fprintf(stderr,
-          "[tachyon metal] output buffers %.1f MB\n",
-          mb(m->outBuf.length + (m->depthBuf ? m->depthBuf.length : 0)
-              + (m->accumBuf ? m->accumBuf.length : 0)));
   }
   std::memcpy(m->frameBuf.contents, &setup.fd, sizeof(FrameData));
   ensureLightBuffer(setup.lights.size() / 8);

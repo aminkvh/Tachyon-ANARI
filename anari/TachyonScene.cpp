@@ -8,7 +8,6 @@ extern "C" {
 }
 
 #include <cmath>
-#include <cstdlib>
 #include <cstring>
 #include <mutex>
 
@@ -70,11 +69,7 @@ void TachyonScene::reset(bool lit, int numThreads)
   rt_camera_raydepth(m_scene, 8);
   rt_set_numthreads(m_scene, numThreads);
 
-  const char *accel = std::getenv("TACHYON_ANARI_ACCEL");
-  if (accel && std::strcmp(accel, "grid") == 0)
-    rt_accelstruct(m_scene, RT_ACCEL_GRID);
-  else
-    rt_accelstruct(m_scene, RT_ACCEL_BVH);
+  rt_accelstruct(m_scene, RT_ACCEL_BVH);
 }
 
 int TachyonScene::addStyle(const SurfaceStyle &s)

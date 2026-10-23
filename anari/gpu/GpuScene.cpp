@@ -3,11 +3,10 @@
 
 #include "GpuScene.h"
 
+#include "../Backends.h"
+
 #include <algorithm>
-#include <cctype>
 #include <cmath>
-#include <cstdio>
-#include <cstdlib>
 #include <cstring>
 #include <limits>
 
@@ -79,19 +78,9 @@ void triangleNormals(const float *p, const float *n, bool forceFlat, float *out)
 
 } // namespace
 
-GpuSceneBase::GpuSceneBase(const char *envPrefix)
+GpuSceneBase::GpuSceneBase()
 {
-  const std::string prefix(envPrefix);
-  const char *dbg = std::getenv((prefix + "_DEBUG").c_str());
-  m_debug = dbg && *dbg && *dbg != '0';
-  const char *acc = std::getenv((prefix + "_ACCUM").c_str());
-  m_accumEnabled = !(acc && *acc == '0');
-  if (const char *r = std::getenv((prefix + "_REFITS").c_str()))
-    m_maxRefits = unsigned(std::max(0, std::atoi(r)));
-  std::string tag = prefix.substr(prefix.find('_') + 1);
-  for (char &ch : tag)
-    ch = char(std::tolower(static_cast<unsigned char>(ch)));
-  m_logTag = "[tachyon " + tag + "]";
+  m_debug = debugEnabled();
   m_protos.emplace_back();
 }
 
@@ -724,7 +713,7 @@ GpuSceneBase::FrameSetup GpuSceneBase::prepareFrame()
   h = fnv(h, &m_buildId, sizeof(m_buildId));
   h = fnv(h, &m_samples, sizeof(m_samples));
   h = fnv(h, &m_colorDst, sizeof(m_colorDst));
-  if (m_accumEnabled && h == m_lastFrameHash)
+  if (h == m_lastFrameHash)
     m_sameFrames++;
   else
     m_sameFrames = 0;
@@ -743,8 +732,6 @@ GpuSceneBase::FrameSetup GpuSceneBase::prepareFrame()
   fd.size[2] = count;
   fd.size[3] = base;
   fd.flags[0] |= accumFlags;
-  if (m_sameFrames == 1 && m_samples == 1 && m_debug)
-    std::fprintf(stderr, "%s accumulating identical frames\n", m_logTag.c_str());
 
   out.base = base;
   out.count = count;

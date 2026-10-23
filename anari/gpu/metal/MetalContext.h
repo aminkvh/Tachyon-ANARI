@@ -54,8 +54,5 @@ class MetalContext
   std::string m_gpuName;
 };
 
-// TACHYON_METAL_DEBUG=1
-bool metalDebug();
-
 } // namespace gpu
 } // namespace tachyon_anari

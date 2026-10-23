@@ -21,6 +21,9 @@ struct BackendChoice
 
 std::unique_ptr<SceneBackend> createCpuBackend();
 
+// TACHYON_DEBUG=1: print the backend choice, the GPU and timings to stderr
+bool debugEnabled();
+
 // Starts initializing a GPU backend in the background (called when the device
 // parameter is committed) so that the first frame only waits for the
 // remainder; waitForBackendPrefetch() blocks until that is done (device

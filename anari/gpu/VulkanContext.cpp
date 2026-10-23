@@ -3,6 +3,7 @@
 
 #include "VulkanContext.h"
 
+#include "../Backends.h"
 #include "shaders/raytrace.spv.h"
 
 #include <algorithm>
@@ -23,21 +24,6 @@ std::weak_ptr<VulkanContext> g_context;
 bool g_failed{false};
 bool g_failedHard{false};
 std::string g_failReason;
-
-// TACHYON_VULKAN_DEBUG=1: print the time of the initialization phases
-void phase(const char *what)
-{
-  static const char *dbg = std::getenv("TACHYON_VULKAN_DEBUG");
-  if (!dbg || !*dbg || *dbg == '0')
-    return;
-  static auto last = std::chrono::steady_clock::now();
-  const auto now = std::chrono::steady_clock::now();
-  std::fprintf(stderr,
-      "[tachyon vulkan]   %s: %.0f ms\n",
-      what,
-      std::chrono::duration<double, std::milli>(now - last).count());
-  last = now;
-}
 
 bool hasExtension(
     const std::vector<VkExtensionProperties> &exts, const char *name)
@@ -71,12 +57,11 @@ std::shared_ptr<VulkanContext> VulkanContext::acquire(
   std::shared_ptr<VulkanContext> ctx(new VulkanContext);
   const auto t0 = std::chrono::steady_clock::now();
   const bool ok = ctx->init(reason, hard);
-  if (const char *dbg = std::getenv("TACHYON_VULKAN_DEBUG"))
-    if (*dbg && *dbg != '0')
-      std::fprintf(stderr, "[tachyon vulkan] context init %.0f ms\n",
-          std::chrono::duration<double, std::milli>(
-              std::chrono::steady_clock::now() - t0)
-              .count());
+  if (debugEnabled())
+    std::fprintf(stderr, "[tachyon vulkan] context init %.0f ms\n",
+        std::chrono::duration<double, std::milli>(
+            std::chrono::steady_clock::now() - t0)
+            .count());
   if (!ok) {
     g_failed = true;
     g_failReason = reason;
@@ -169,11 +154,6 @@ bool VulkanContext::createPipelines(std::string &reason)
 bool VulkanContext::init(std::string &reason, bool &hard)
 {
   hard = false;
-  phase("start");
-  if (const char *e = std::getenv("TACHYON_VULKAN_MEMORY_LIMIT_MB"))
-    m_memoryLimit = size_t(std::atoll(e)) << 20;
-  if (const char *e = std::getenv("TACHYON_VULKAN_FAKE_LOST"))
-    m_fakeLostAfter = std::atol(e);
   if (volkInitialize() != VK_SUCCESS) {
     reason = "no Vulkan loader found";
     return false;
@@ -194,7 +174,6 @@ bool VulkanContext::init(std::string &reason, bool &hard)
     hard = true;
     return false;
   }
-  phase("vkCreateInstance");
   volkLoadInstanceOnly(m_instance);
 
   uint32_t count = 0;
@@ -206,7 +185,7 @@ bool VulkanContext::init(std::string &reason, bool &hard)
     return false;
   }
 
-  // TACHYON_VULKAN_DEVICE=<index>: only consider that device (diagnostics)
+  // TACHYON_VULKAN_DEVICE=<index>: only consider that device
   int forced = -1;
   if (const char *env = std::getenv("TACHYON_VULKAN_DEVICE"))
     if (*env)
@@ -295,9 +274,7 @@ bool VulkanContext::init(std::string &reason, bool &hard)
     dci.pQueueCreateInfos = &qci;
     dci.enabledExtensionCount = 3;
     dci.ppEnabledExtensionNames = devExts;
-    phase("device selection");
     res = vkCreateDevice(pd, &dci, nullptr, &m_device);
-    phase("vkCreateDevice");
     if (res != VK_SUCCESS) {
       why += name + ": vkCreateDevice failed; ";
       continue;
@@ -329,12 +306,10 @@ bool VulkanContext::init(std::string &reason, bool &hard)
       hard = true;
       return false;
     }
-    phase("command pool");
     if (!createPipelines(reason)) {
       hard = true;
       return false;
     }
-    phase("pipelines");
     return true;
   }
 
@@ -394,11 +369,6 @@ GpuBuffer VulkanContext::createBuffer(
 
   VkMemoryRequirements req;
   vkGetBufferMemoryRequirements(m_device, b.buffer, &req);
-  if (kind == MemoryKind::DeviceLocal && m_memoryLimit
-      && m_deviceBytes + req.size > m_memoryLimit) {
-    vkDestroyBuffer(m_device, b.buffer, nullptr); // simulated exhaustion
-    throw std::runtime_error("Vulkan out of memory (simulated limit)");
-  }
 
   uint32_t type = ~0u;
   const VkMemoryPropertyFlags dl = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
@@ -410,7 +380,6 @@ GpuBuffer VulkanContext::createBuffer(
     type = findMemoryType(req.memoryTypeBits, dl, hv);
     if (type == ~0u)
       type = findMemoryType(req.memoryTypeBits, dl, 0);
-    b.deviceLocal = true;
     break;
   case MemoryKind::Upload:
     type = findMemoryType(req.memoryTypeBits, hv | hc, dl | cached);
@@ -445,15 +414,12 @@ GpuBuffer VulkanContext::createBuffer(
   }
   vkBindBufferMemory(m_device, b.buffer, b.memory, 0);
 
-  b.size = req.size; // the accounted size, used again when destroying
+  b.size = req.size;
   b.hostCoherent = (m_mem.memoryTypes[type].propertyFlags & hc) != 0;
   if (kind != MemoryKind::DeviceLocal) {
     if (vkMapMemory(m_device, b.memory, 0, VK_WHOLE_SIZE, 0, &b.mapped)
         != VK_SUCCESS)
       b.mapped = nullptr;
-  } else {
-    m_deviceBytes += size_t(req.size);
-    m_peakDeviceBytes = std::max(m_peakDeviceBytes, m_deviceBytes);
   }
   VkBufferDeviceAddressInfo dai{VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO};
   dai.buffer = b.buffer;
@@ -470,8 +436,6 @@ void VulkanContext::destroyBuffer(GpuBuffer &b)
     vkUnmapMemory(m_device, b.memory);
   vkDestroyBuffer(m_device, b.buffer, nullptr);
   vkFreeMemory(m_device, b.memory, nullptr);
-  if (b.deviceLocal)
-    m_deviceBytes -= size_t(b.size);
   b = GpuBuffer();
 }
 
@@ -512,10 +476,6 @@ void VulkanContext::endAndWait(VkCommandBuffer cb)
   si.pCommandBuffers = &cb;
   vkResetFences(m_device, 1, &m_fence);
   VkResult r = vkQueueSubmit(m_queue, 1, &si, m_fence);
-  if (m_fakeLostAfter >= 0 && m_fakeLostAfter-- == 0) {
-    vkWaitForFences(m_device, 1, &m_fence, VK_TRUE, UINT64_MAX);
-    r = VK_ERROR_DEVICE_LOST; // simulated for tests
-  }
   if (r == VK_SUCCESS)
     r = vkWaitForFences(m_device, 1, &m_fence, VK_TRUE, UINT64_MAX);
   vkFreeCommandBuffers(m_device, m_pool, 1, &cb);

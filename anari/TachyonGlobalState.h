@@ -23,10 +23,6 @@ struct TachyonGlobalState : public helium::BaseGlobalDeviceState
   // rebuild the Tachyon scene only when this is newer than their last build.
   std::atomic<helium::TimeStamp> sceneStamp{1};
 
-  // Number of Tachyon scene (geometry + acceleration structure) rebuilds,
-  // exposed as the "tachyon.sceneBuilds" device property for diagnostics.
-  std::atomic<uint64_t> sceneBuilds{0};
-
   int numThreads{-1}; // <= 0: one per CPU
 
   // "backend" device parameter: auto | cpu | vulkan
