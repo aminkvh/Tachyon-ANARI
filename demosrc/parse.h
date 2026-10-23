@@ -21,8 +21,29 @@ typedef struct {
         void * tex;
 } texentry;
 
+/* key for sharing identical constant-color textures */
 typedef struct {
-  char * buf;             /* whole current input file, read in one shot   */
+  float v[11];           /* amb dif spec opac phong size outl outlw rgb */
+  int phongtype;
+  int transmode;
+} texkey;
+
+typedef struct {
+  texkey key;
+  void * tex;            /* NULL for an empty slot                  */
+} texcacheent;
+
+/* spheres of one texture, emitted as a sphere array at end of scene */
+typedef struct {
+  void * tex;
+  int n;
+  int cap;
+  float * ctr;           /* 3 floats per sphere */
+  float * rad;
+} sphbatch;
+
+typedef struct {
+  char * buf;            /* whole current input file, read in one shot   */
   long buflen;            /* length of buf, in bytes                      */
   long bufpos;            /* current read cursor into buf                 */
   const char * filename; /* filename of current input file */
@@ -33,7 +54,16 @@ typedef struct {
   int numobjectsparsed;  /* total number of objects parsed so far   */
   rt_hash_t texhash;     /* hash table for texture name lookup      */
   int transmode;         /* transparency rendering mode flags       */
-} parsehandle;  
+  texcacheent * texcache; /* hash of shareable textures             */
+  int texcachesz;        /* slots in texcache (power of 2, or 0)    */
+  int texcachecnt;       /* used slots                              */
+  sphbatch * batches;    /* pending sphere batches                  */
+  int numbatches;
+  int maxbatches;
+  int lastbatch;         /* batch used by the previous sphere       */
+  int * bhash;           /* tex pointer -> batch index, -1 if empty */
+  int bhashsz;           /* power of 2, or 0                        */
+} parsehandle;
 
 typedef struct {
    double rx1; double rx2; double rx3;
@@ -68,6 +98,7 @@ static errcode GetCylinder(parsehandle *, SceneHandle);
 static errcode GetFCylinder(parsehandle *, SceneHandle);
 static errcode GetPolyCylinder(parsehandle *, SceneHandle);
 static errcode GetSphere(parsehandle *, SceneHandle);
+static void flush_spheres(parsehandle *, SceneHandle);
 static errcode GetSphereArray(parsehandle *, SceneHandle);
 static errcode GetPlane(parsehandle *, SceneHandle);
 static errcode GetRing(parsehandle *, SceneHandle);

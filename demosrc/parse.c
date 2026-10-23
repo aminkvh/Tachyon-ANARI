@@ -337,6 +337,256 @@ static void * find_texture(parsehandle * ph, const char * name) {
   return(ph->defaulttex.tex); 
 }
 
+/*
+ * Texture sharing: VMD writes a full inline texture block per atom.  A
+ * constant-color texture (texfunc 0) is fully described by the scalar
+ * parameters in texkey, so identical blocks can share one texture object.
+ * Other texture functions are never shared.
+ */
+static unsigned int texkey_hash(const texkey * k) {
+  const unsigned char * p = (const unsigned char *) k;
+  unsigned int h = 2166136261u;
+  size_t i;
+  for (i=0; i<sizeof(texkey); i++)
+    h = (h ^ p[i]) * 16777619u;
+  return h;
+}
+
+static void * texcache_find(parsehandle * ph, const texkey * k) {
+  unsigned int m, i;
+  if (ph->texcachesz == 0)
+    return NULL;
+  m = ph->texcachesz - 1;
+  for (i = texkey_hash(k) & m; ph->texcache[i].tex != NULL; i = (i+1) & m) {
+    if (!memcmp(&ph->texcache[i].key, k, sizeof(texkey)))
+      return ph->texcache[i].tex;
+  }
+  return NULL;
+}
+
+static void texcache_add(parsehandle * ph, const texkey * k, void * tex) {
+  unsigned int m, i;
+  if (2 * (ph->texcachecnt + 1) > ph->texcachesz) {
+    texcacheent * old = ph->texcache;
+    int oldsz = ph->texcachesz, j;
+    ph->texcachesz = oldsz ? 2 * oldsz : 256;
+    ph->texcache = (texcacheent *) calloc(ph->texcachesz, sizeof(texcacheent));
+    if (ph->texcache == NULL) { /* out of memory: stop sharing */
+      ph->texcache = old;
+      ph->texcachesz = oldsz;
+      return;
+    }
+    m = ph->texcachesz - 1;
+    for (j=0; j<oldsz; j++) {
+      if (old[j].tex != NULL) {
+        for (i = texkey_hash(&old[j].key) & m; ph->texcache[i].tex; i = (i+1) & m);
+        ph->texcache[i] = old[j];
+      }
+    }
+    free(old);
+  }
+  m = ph->texcachesz - 1;
+  for (i = texkey_hash(k) & m; ph->texcache[i].tex != NULL; i = (i+1) & m);
+  ph->texcache[i].key = *k;
+  ph->texcache[i].tex = tex;
+  ph->texcachecnt++;
+}
+
+/*
+ * Sphere batching: spheres are collected per texture and emitted at the end
+ * of the scene.  Batches of at least BATCHMIN spheres become one sphere array
+ * (compact, own BVH); smaller ones use plain per-sphere objects.
+ */
+#define BATCHMIN 64
+
+static unsigned int ptrhash(const void * p) {
+  size_t v = (size_t) p;
+  return (unsigned int) ((v >> 4) * 2654435761u);
+}
+
+static int batch_lookup(parsehandle * ph, void * tex) {
+  unsigned int m, i;
+  int b;
+
+  if (ph->bhashsz == 0 || 2 * (ph->numbatches + 1) > ph->bhashsz) {
+    int j, sz = ph->bhashsz ? 2 * ph->bhashsz : 256;
+    free(ph->bhash);
+    ph->bhash = (int *) malloc(sz * sizeof(int));
+    ph->bhashsz = sz;
+    for (j=0; j<sz; j++)
+      ph->bhash[j] = -1;
+    m = sz - 1;
+    for (j=0; j<ph->numbatches; j++) {
+      for (i = ptrhash(ph->batches[j].tex) & m; ph->bhash[i] >= 0; i = (i+1) & m);
+      ph->bhash[i] = j;
+    }
+  }
+
+  m = ph->bhashsz - 1;
+  for (i = ptrhash(tex) & m; (b = ph->bhash[i]) >= 0; i = (i+1) & m) {
+    if (ph->batches[b].tex == tex)
+      return b;
+  }
+
+  if (ph->numbatches >= ph->maxbatches) {
+    ph->maxbatches = ph->maxbatches ? 2 * ph->maxbatches : 64;
+    ph->batches = (sphbatch *) realloc(ph->batches, ph->maxbatches * sizeof(sphbatch));
+  }
+  b = ph->numbatches++;
+  memset(&ph->batches[b], 0, sizeof(sphbatch));
+  ph->batches[b].tex = tex;
+  ph->bhash[i] = b;
+  return b;
+}
+
+static void batch_sphere(parsehandle * ph, void * tex, const apivector * c, float r) {
+  sphbatch * sb;
+
+  /* consecutive spheres usually share the texture */
+  if (ph->numbatches > 0 && ph->batches[ph->lastbatch].tex == tex)
+    sb = &ph->batches[ph->lastbatch];
+  else {
+    ph->lastbatch = batch_lookup(ph, tex);
+    sb = &ph->batches[ph->lastbatch];
+  }
+
+  if (sb->n >= sb->cap) {
+    sb->cap = sb->cap ? 2 * sb->cap : 256;
+    sb->ctr = (float *) realloc(sb->ctr, 3 * sb->cap * sizeof(float));
+    sb->rad = (float *) realloc(sb->rad, sb->cap * sizeof(float));
+  }
+  sb->ctr[3*sb->n]   = (float) c->x;
+  sb->ctr[3*sb->n+1] = (float) c->y;
+  sb->ctr[3*sb->n+2] = (float) c->z;
+  sb->rad[sb->n] = r;
+  sb->n++;
+}
+
+/* batch plus its texture key with the color zeroed, for grouping */
+typedef struct {
+  int batch;
+  int haskey;
+  float rgb[3];
+  texkey key;
+} batchgrp;
+
+static int batchgrp_cmp(const void * pa, const void * pb) {
+  const batchgrp * a = (const batchgrp *) pa;
+  const batchgrp * b = (const batchgrp *) pb;
+  int c;
+  if (a->haskey != b->haskey)
+    return a->haskey - b->haskey;
+  c = memcmp(&a->key, &b->key, sizeof(texkey));
+  return c ? c : a->batch - b->batch;
+}
+
+/* find the batch of a texture without creating one, or -1 */
+static int batch_find(parsehandle * ph, void * tex) {
+  unsigned int m, i;
+  int b;
+  if (ph->bhashsz == 0)
+    return -1;
+  m = ph->bhashsz - 1;
+  for (i = ptrhash(tex) & m; (b = ph->bhash[i]) >= 0; i = (i+1) & m) {
+    if (ph->batches[b].tex == tex)
+      return b;
+  }
+  return -1;
+}
+
+static void emit_plain(SceneHandle scene, sphbatch * sb) {
+  int i;
+  for (i=0; i<sb->n; i++)
+    rt_sphere3fv(scene, sb->tex, &sb->ctr[3*i], sb->rad[i]);
+}
+
+/*
+ * Batches whose textures differ only in color are merged into one sphere
+ * array with per-sphere colors: one BVH instead of one per color, which
+ * would overlap and be traversed by every ray.
+ */
+static void flush_spheres(parsehandle * ph, SceneHandle scene) {
+  int b, i, j, k, e;
+  batchgrp * grp;
+
+  grp = (batchgrp *) calloc(ph->numbatches + 1, sizeof(batchgrp));
+  for (b=0; b<ph->numbatches; b++)
+    grp[b].batch = b;
+  for (e=0; e<ph->texcachesz; e++) {
+    if (ph->texcache[e].tex != NULL) {
+      b = batch_find(ph, ph->texcache[e].tex);
+      if (b >= 0) {
+        grp[b].haskey = 1;
+        grp[b].key = ph->texcache[e].key;
+        grp[b].rgb[0] = grp[b].key.v[8];
+        grp[b].rgb[1] = grp[b].key.v[9];
+        grp[b].rgb[2] = grp[b].key.v[10];
+        grp[b].key.v[8] = grp[b].key.v[9] = grp[b].key.v[10] = 0.0f;
+      }
+    }
+  }
+  qsort(grp, ph->numbatches, sizeof(batchgrp), batchgrp_cmp);
+
+  for (i=0; i<ph->numbatches; i=j) {
+    long total = 0;
+    for (j=i; j<ph->numbatches; j++) {
+      if (j > i && (!grp[i].haskey || !grp[j].haskey
+          || memcmp(&grp[i].key, &grp[j].key, sizeof(texkey))))
+        break;
+      total += ph->batches[grp[j].batch].n;
+    }
+
+    if (total < BATCHMIN) {
+      for (k=i; k<j; k++)
+        emit_plain(scene, &ph->batches[grp[k].batch]);
+    } else if (j == i + 1) {
+      sphbatch * sb = &ph->batches[grp[i].batch];
+      rt_spherearray(scene, sb->tex, sb->n, sb->ctr, sb->rad, 0.0f, NULL);
+    } else {
+      float * ctr = (float *) malloc(total * 3 * sizeof(float));
+      float * rad = (float *) malloc(total * sizeof(float));
+      float * rgb = (float *) malloc(total * 3 * sizeof(float));
+      long n = 0;
+      if (ctr && rad && rgb) {
+        for (k=i; k<j; k++) {
+          sphbatch * sb = &ph->batches[grp[k].batch];
+          int s;
+          memcpy(ctr + 3*n, sb->ctr, 3 * sb->n * sizeof(float));
+          memcpy(rad + n, sb->rad, sb->n * sizeof(float));
+          for (s=0; s<sb->n; s++) {
+            rgb[3*(n+s)]   = grp[k].rgb[0];
+            rgb[3*(n+s)+1] = grp[k].rgb[1];
+            rgb[3*(n+s)+2] = grp[k].rgb[2];
+          }
+          n += sb->n;
+        }
+        rt_spherearray(scene, ph->batches[grp[i].batch].tex, (int) n, ctr, rad,
+                       0.0f, rgb);
+      } else {
+        for (k=i; k<j; k++)
+          emit_plain(scene, &ph->batches[grp[k].batch]);
+      }
+      free(ctr);
+      free(rad);
+      free(rgb);
+    }
+  }
+  free(grp);
+
+  for (b=0; b<ph->numbatches; b++) {
+    free(ph->batches[b].ctr);
+    free(ph->batches[b].rad);
+  }
+  free(ph->batches);
+  free(ph->bhash);
+  free(ph->texcache);
+  ph->batches = NULL;
+  ph->bhash = NULL;
+  ph->texcache = NULL;
+  ph->numbatches = ph->maxbatches = ph->bhashsz = 0;
+  ph->texcachesz = ph->texcachecnt = 0;
+}
+
 apiflt degtorad(apiflt deg) {
   apiflt tmp;
   tmp=deg * 3.1415926 / 180.0;
@@ -471,6 +721,8 @@ unsigned int readmodel(const char * modelfile, SceneHandle scene) {
     if (rc == PARSEEOF)
       rc = PARSENOERR;
   }
+
+  flush_spheres(&ph, scene);
 
   free(ph.buf);
 
@@ -1142,6 +1394,29 @@ void * GetTexBody(parsehandle * ph, SceneHandle scene, int modeflag) {
     tex.texturefunc = 0; /* set to none by default, gets reset anyway */
   }
 
+  if (modeflag == 0 && tex.texturefunc == RT_TEXTURE_CONSTANT) {
+    texkey key;
+    memset(&key, 0, sizeof(key));
+    key.v[0] = (float) tex.ambient;  key.v[1] = (float) tex.diffuse;
+    key.v[2] = (float) tex.specular; key.v[3] = (float) tex.opacity;
+    key.v[4] = phong;        key.v[5] = phongexp;
+    key.v[6] = outline;      key.v[7] = outlinewidth;
+    key.v[8] = (float) tex.col.r;
+    key.v[9] = (float) tex.col.g;
+    key.v[10] = (float) tex.col.b;
+    key.phongtype = phongtype;
+    key.transmode = transmode;
+    voidtex = texcache_find(ph, &key);
+    if (voidtex != NULL)
+      return voidtex;
+    voidtex = rt_texture(scene, &tex);
+    rt_tex_phong(voidtex, phong, phongexp, phongtype);
+    rt_tex_transmode(voidtex, transmode);
+    rt_tex_outline(voidtex, outline, outlinewidth);
+    texcache_add(ph, &key, voidtex);
+    return voidtex;
+  }
+
   voidtex = rt_texture(scene, &tex);
   rt_tex_phong(voidtex, phong, phongexp, phongtype);
   rt_tex_transmode(voidtex, transmode);
@@ -1490,7 +1765,7 @@ static errcode GetSphere(parsehandle * ph, SceneHandle scene) {
 
   rc |= GetTexture(ph, scene, &tex); 
  
-  rt_sphere(scene, tex, ctr, rad);
+  batch_sphere(ph, tex, &ctr, (float) rad);
 
   return rc;
 }
