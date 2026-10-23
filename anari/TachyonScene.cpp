@@ -156,6 +156,56 @@ void TachyonScene::addTriangle(
   }
 }
 
+void TachyonScene::addSampledTriangle(int style,
+    const float *p,
+    const float *n,
+    const float *vertexAttr,
+    AttrSampleFn fn,
+    const void *user)
+{
+  Style &st = m_styles[style];
+  m_numTriangles++;
+
+  // Like addTriangle(): interpolated normals must agree with the winding
+  const float e1[3] = {p[3] - p[0], p[4] - p[1], p[5] - p[2]};
+  const float e2[3] = {p[6] - p[0], p[7] - p[1], p[8] - p[2]};
+  const float gx = e1[1] * e2[2] - e1[2] * e2[1];
+  const float gy = e1[2] * e2[0] - e1[0] * e2[2];
+  const float gz = e1[0] * e2[1] - e1[1] * e2[0];
+
+  float fn3[9];
+  if (!n) { // the flat face normal
+    const float len = std::sqrt(gx * gx + gy * gy + gz * gz);
+    const float s = len > 0.f ? 1.f / len : 0.f;
+    for (int i = 0; i < 3; i++) {
+      fn3[3 * i + 0] = gx * s;
+      fn3[3 * i + 1] = gy * s;
+      fn3[3 * i + 2] = gz * s;
+    }
+  } else {
+    float d = 0.f;
+    for (int i = 0; i < 3; i++)
+      d += n[3 * i] * gx + n[3 * i + 1] * gy + n[3 * i + 2] * gz;
+    const float sign = d < 0.f ? -1.f : 1.f;
+    for (int i = 0; i < 9; i++)
+      fn3[i] = sign * n[i];
+  }
+
+  void *tex = rt_texture_copy_sampled(m_scene, st.textures[0]);
+  st.textures.push_back(tex); // needs shading updates too
+  rt_sampledtri3fv(m_scene,
+      tex,
+      p,
+      p + 3,
+      p + 6,
+      fn3,
+      fn3 + 3,
+      fn3 + 6,
+      vertexAttr,
+      fn,
+      user);
+}
+
 void *TachyonScene::colorTexture(Style &st, const float *rgb)
 {
   if (!rgb)

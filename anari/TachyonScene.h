@@ -51,6 +51,18 @@ class TachyonScene
   int addStyle(const SurfaceStyle &style);
   // p: 3 x xyz, n: 3 x xyz or nullptr, c: 3 x rgb or nullptr
   void addTriangle(int style, const float *p, const float *n, const float *c);
+  // Triangle whose color is computed for every hit by 'fn(user, attr, rgb)':
+  // 'attr' is the 4 component vertex attribute value interpolated at the hit
+  // point (the attributes of the 3 vertices are given in 'vertexAttr', 12
+  // floats). 'fn' is called from the render threads. The style's color is
+  // ignored.
+  using AttrSampleFn = void (*)(const void *user, const float *attr, float *rgb);
+  void addSampledTriangle(int style,
+      const float *p,
+      const float *n,
+      const float *vertexAttr,
+      AttrSampleFn fn,
+      const void *user);
   // Spheres and cylinders are allocated from the scene's bulk arena (no
   // per-object malloc). 'rgb' (3 floats, may be nullptr) overrides the style
   // color; textures are shared between all objects of a style that use the

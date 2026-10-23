@@ -142,10 +142,24 @@ static inline void xfmNormal(const float3x3 &nm, const float *n, float *out)
   out[2] = r.z;
 }
 
-// Reads a color element as rgb regardless of its stored type
-static inline void readColor(const Array1D &a, size_t i, float *out)
+// Reads a color element as rgb regardless of its stored type; with a sampler
+// the element is the sampler's input attribute value
+static inline void readColor(
+    const Array1D &a, size_t i, const Sampler *sampler, float *out)
 {
-  const float4 c = a.readAsAttributeValue(int32_t(i));
+  float4 c = a.readAsAttributeValue(int32_t(i));
+  if (sampler)
+    c = sampler->sample(c);
+  out[0] = c.x;
+  out[1] = c.y;
+  out[2] = c.z;
+}
+
+// Color of primitive 'prim' from a primitive sampler
+static inline void primitiveColor(
+    const Sampler &sampler, size_t prim, float *out)
+{
+  const float4 c = sampler.samplePrimitive(prim);
   out[0] = c.x;
   out[1] = c.y;
   out[2] = c.z;
@@ -184,7 +198,8 @@ void Triangle::emit(TachyonScene &scene,
     int style,
     const mat4 &xfm,
     int colorAttr,
-    PrimStyleBinder *binder) const
+    PrimStyleBinder *binder,
+    const Sampler *colorSampler) const
 {
   if (!m_valid)
     return;
@@ -209,8 +224,15 @@ void Triangle::emit(TachyonScene &scene,
       colorAttr >= 0 ? m_vertexAttr[colorAttr].get() : nullptr;
   const Array1D *pattr =
       (colorAttr >= 0 && !vattr) ? m_primAttr[colorAttr].get() : nullptr;
-  const bool vcol = vattr != nullptr;
-  const bool pcol = pattr != nullptr;
+  const bool primSampler = colorSampler && colorSampler->isPrimitive();
+  // A sampler applied to a vertex attribute is evaluated per hit, with the
+  // attribute interpolated over the triangle
+  const bool hitSampled = colorSampler && !primSampler && vattr;
+  const Sampler *valueSampler = (colorSampler && !primSampler && !vattr)
+      ? colorSampler
+      : nullptr; // maps constant per-primitive values
+  const bool vcol = vattr != nullptr && !hitSampled;
+  const bool pcol = pattr != nullptr || primSampler;
 
   for (size_t t = 0; t < m_numTriangles; t++) {
     const uint32_t i0 = idx ? idx[3 * t + 0] : uint32_t(3 * t + 0);
@@ -231,11 +253,14 @@ void Triangle::emit(TachyonScene &scene,
     }
 
     if (vcol) {
-      readColor(*vattr, i0, c + 0);
-      readColor(*vattr, i1, c + 3);
-      readColor(*vattr, i2, c + 6);
+      readColor(*vattr, i0, nullptr, c + 0);
+      readColor(*vattr, i1, nullptr, c + 3);
+      readColor(*vattr, i2, nullptr, c + 6);
     } else if (pcol) {
-      readColor(*pattr, t, c + 0);
+      if (primSampler)
+        primitiveColor(*colorSampler, t, c + 0);
+      else
+        readColor(*pattr, t, valueSampler, c + 0);
       std::copy(c, c + 3, c + 3);
       std::copy(c, c + 3, c + 6);
     }
@@ -245,9 +270,27 @@ void Triangle::emit(TachyonScene &scene,
       const size_t verts[3] = {i0, i1, i2};
       float4 vals[kNumAttributes];
       fillAttrValues(binder->attrMask, m_vertexAttr, m_primAttr, verts, 3, t, vals);
-      tstyle = binder->styleFor(vals);
+      tstyle = binder->styleFor(vals, t);
       if (tstyle < 0)
         continue;
+    }
+    if (hitSampled) {
+      float a[12];
+      const uint32_t vi[3] = {i0, i1, i2};
+      for (int k = 0; k < 3; k++) {
+        const float4 v = vattr->readAsAttributeValue(int32_t(vi[k]));
+        a[4 * k + 0] = v.x;
+        a[4 * k + 1] = v.y;
+        a[4 * k + 2] = v.z;
+        a[4 * k + 3] = v.w;
+      }
+      scene.addSampledTriangle(tstyle,
+          p,
+          nrm ? n : nullptr,
+          a,
+          Sampler::sampleCallback,
+          colorSampler);
+      continue;
     }
     scene.addTriangle(
         tstyle, p, nrm ? n : nullptr, (vcol || pcol) ? c : nullptr);
@@ -398,7 +441,8 @@ void Sphere::emit(TachyonScene &scene,
     int style,
     const mat4 &xfm,
     int colorAttr,
-    PrimStyleBinder *binder) const
+    PrimStyleBinder *binder,
+    const Sampler *colorSampler) const
 {
   if (!m_valid)
     return;
@@ -413,6 +457,15 @@ void Sphere::emit(TachyonScene &scene,
       colorAttr >= 0 ? m_vertexAttr[colorAttr].get() : nullptr;
   const Array1D *pattr =
       (colorAttr >= 0 && !vattr) ? m_primAttr[colorAttr].get() : nullptr;
+  const bool primSampler = colorSampler && colorSampler->isPrimitive();
+  const Sampler *valueSampler = primSampler ? nullptr : colorSampler;
+  const bool perSphereColor = vattr || pattr || primSampler;
+  auto sphereColor = [&](size_t vi, size_t p, float *col) {
+    if (primSampler)
+      primitiveColor(*colorSampler, p, col);
+    else
+      readColor(vattr ? *vattr : *pattr, vattr ? vi : p, valueSampler, col);
+  };
 
   // Fast path: positions used in place (no index, identity transform) and
   // radius/validity needing no per-sphere work
@@ -440,7 +493,7 @@ void Sphere::emit(TachyonScene &scene,
     tmpPos.reserve(3 * m_numPrims);
     if (vrad)
       tmpRad.reserve(m_numPrims);
-    if (vattr || pattr)
+    if (perSphereColor)
       tmpCol.reserve(3 * m_numPrims);
     for (size_t p = 0; p < m_numPrims; p++) {
       const size_t vi = m_index ? indexAt(*m_index, p, 1, 0) : p;
@@ -455,7 +508,7 @@ void Sphere::emit(TachyonScene &scene,
       if (binder) {
         float4 vals[kNumAttributes];
         fillAttrValues(binder->attrMask, m_vertexAttr, m_primAttr, &vi, 1, p, vals);
-        const int sid = binder->styleFor(vals);
+        const int sid = binder->styleFor(vals, p);
         if (sid < 0)
           continue;
         tmpStyle.push_back(sid);
@@ -465,9 +518,9 @@ void Sphere::emit(TachyonScene &scene,
       tmpPos.insert(tmpPos.end(), c, c + 3);
       if (vrad)
         tmpRad.push_back(r);
-      if (vattr || pattr) {
+      if (perSphereColor) {
         float col[3];
-        readColor(vattr ? *vattr : *pattr, vattr ? vi : p, col);
+        sphereColor(vi, p, col);
         tmpCol.insert(tmpCol.end(), col, col + 3);
       }
     }
@@ -511,10 +564,10 @@ void Sphere::emit(TachyonScene &scene,
   }
 
   // direct: only per-sphere colors still need converting
-  if (vattr || pattr) {
+  if (perSphereColor) {
     tmpCol.resize(3 * m_numPrims);
     for (size_t p = 0; p < m_numPrims; p++)
-      readColor(vattr ? *vattr : *pattr, p, &tmpCol[3 * p]);
+      sphereColor(p, p, &tmpCol[3 * p]);
   }
   scene.addSpheres(style,
       m_numPrims,
@@ -615,7 +668,8 @@ void Cylinder::emit(TachyonScene &scene,
     int style,
     const mat4 &xfm,
     int colorAttr,
-    PrimStyleBinder *binder) const
+    PrimStyleBinder *binder,
+    const Sampler *colorSampler) const
 {
   if (!m_valid)
     return;
@@ -633,6 +687,8 @@ void Cylinder::emit(TachyonScene &scene,
       colorAttr >= 0 ? m_vertexAttr[colorAttr].get() : nullptr;
   const Array1D *pattr =
       (colorAttr >= 0 && !vattr) ? m_primAttr[colorAttr].get() : nullptr;
+  const bool primSampler = colorSampler && colorSampler->isPrimitive();
+  const Sampler *valueSampler = primSampler ? nullptr : colorSampler;
 
   for (size_t p = 0; p < m_numPrims; p++) {
     const size_t v0 = m_index ? indexAt(*m_index, p, 2, 0) : 2 * p;
@@ -648,7 +704,7 @@ void Cylinder::emit(TachyonScene &scene,
       const size_t verts[2] = {v0, v1};
       float4 vals[kNumAttributes];
       fillAttrValues(binder->attrMask, m_vertexAttr, m_primAttr, verts, 2, p, vals);
-      cstyle = binder->styleFor(vals);
+      cstyle = binder->styleFor(vals, p);
       if (cstyle < 0)
         continue;
     }
@@ -658,12 +714,16 @@ void Cylinder::emit(TachyonScene &scene,
     xfmPoint(xfm, pos + 3 * v1, b);
     const float *col0 = nullptr, *col1 = nullptr;
     if (vattr) {
-      readColor(*vattr, v0, c0);
-      readColor(*vattr, v1, c1);
+      // the colors at both ends; the cylinder is split between them
+      readColor(*vattr, v0, valueSampler, c0);
+      readColor(*vattr, v1, valueSampler, c1);
       col0 = c0;
       col1 = c1;
     } else if (pattr) {
-      readColor(*pattr, p, c0);
+      readColor(*pattr, p, valueSampler, c0);
+      col0 = c0;
+    } else if (primSampler) {
+      primitiveColor(*colorSampler, p, c0);
       col0 = c0;
     }
 

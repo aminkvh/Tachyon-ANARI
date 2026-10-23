@@ -138,6 +138,31 @@ void World::collect(std::vector<SurfaceInstance> &surfaces,
   }
 }
 
+static void mergeBox(
+    bool &any, float3 &lo, float3 &hi, const float3 &l, const float3 &h)
+{
+  lo = any ? linalg::min(lo, l) : l;
+  hi = any ? linalg::max(hi, h) : h;
+  any = true;
+}
+
+// Bounds of the visible, valid surfaces of 'surfaces' under 'xfm'
+static bool surfacesBounds(
+    const ObjectArray *surfaces, const mat4 &xfm, float3 &lo, float3 &hi)
+{
+  bool any = false;
+  if (!surfaces)
+    return false;
+  std::for_each(surfaces->handlesBegin(), surfaces->handlesEnd(), [&](auto *o) {
+    auto *s = static_cast<Surface *>(o);
+    float3 l, h;
+    if (s && s->isValid() && s->isVisible()
+        && s->geometry()->bounds(xfm, l, h))
+      mergeBox(any, lo, hi, l, h);
+  });
+  return any;
+}
+
 bool World::getProperty(const std::string_view &name,
     ANARIDataType type,
     void *ptr,
@@ -145,18 +170,34 @@ bool World::getProperty(const std::string_view &name,
     uint32_t flags)
 {
   if (name == "bounds" && type == ANARI_FLOAT32_BOX3) {
-    std::vector<SurfaceInstance> surfaces;
-    std::vector<LightInstance> lights;
-    collect(surfaces, lights);
+    // Surfaces directly in the world are bounded exactly. An instance is
+    // bounded by the transformed box of its group, which takes O(1) per
+    // instance however much geometry the group holds.
     bool any = false;
     float3 lo(0.f), hi(0.f);
-    for (auto &si : surfaces) {
-      float3 l, h;
-      if (si.surface->geometry()->bounds(si.xfm, l, h)) {
-        lo = any ? linalg::min(lo, l) : l;
-        hi = any ? linalg::max(hi, h) : h;
-        any = true;
-      }
+    float3 l, h;
+    if (surfacesBounds(m_zeroSurfaces.get(), mat4(linalg::identity), l, h))
+      mergeBox(any, lo, hi, l, h);
+    if (m_instances) {
+      std::for_each(
+          m_instances->handlesBegin(), m_instances->handlesEnd(), [&](auto *o) {
+            auto *i = static_cast<Instance *>(o);
+            if (!i || !i->isValid()
+                || !surfacesBounds(i->group()->surfaces(),
+                    mat4(linalg::identity),
+                    l,
+                    h))
+              return;
+            for (int c = 0; c < 8; c++) {
+              const float4 p = linalg::mul(i->xfm(),
+                  float4((c & 1) ? h.x : l.x,
+                      (c & 2) ? h.y : l.y,
+                      (c & 4) ? h.z : l.z,
+                      1.f));
+              const float3 q(p.x, p.y, p.z);
+              mergeBox(any, lo, hi, q, q);
+            }
+          });
     }
     if (!any)
       return false;

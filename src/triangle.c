@@ -205,6 +205,55 @@ object * newvcstri(rt_bulkarena * arena, void * voidtex, vector v0, vector v1, v
 }
 
 
+/* Triangle whose color is computed per hit by a user supplied function from
+ * the barycentrically interpolated vertex attributes stored on its texture.
+ * It is an stri (the per-vertex colors of a vcstri are not needed), so it
+ * also works with the vcstri_arena_methods* tables and vcstri_normal_fixup(). */
+object * newsampledtri(rt_bulkarena * arena, void * voidtex, 
+                       vector v0, vector v1, vector v2,
+                       vector n0, vector n1, vector n2, const float * attr,
+                       rt_attrsample_fn fn, const void * user) {
+  stri * t;
+  vector edge1, edge2, edge3;
+  sampledtri_texture * tex = (sampledtri_texture *) voidtex; 
+
+  VSub(&v1, &v0, &edge1);
+  VSub(&v2, &v0, &edge2);
+  VSub(&v2, &v1, &edge3);
+
+  /* check to see if this will be a degenerate triangle before creation */
+  if ((VLength(&edge1) >= EPSILON) && 
+      (VLength(&edge2) >= EPSILON) &&
+      (VLength(&edge3) >= EPSILON)) {
+
+    t=(stri *) rt_bulkarena_alloc(arena, sizeof(stri));
+
+    t->nextobj = NULL;
+    t->methods = &vcstri_arena_methods;
+
+    t->v0 = v0;
+    t->edge1 = edge1;
+    t->edge2 = edge2;
+    t->n0 = n0;
+    t->n1 = n1;
+    t->n2 = n2;
+
+    memcpy(tex->a0, attr + 0, 4 * sizeof(float));
+    memcpy(tex->a1, attr + 4, 4 * sizeof(float));
+    memcpy(tex->a2, attr + 8, 4 * sizeof(float));
+    tex->fn = fn;
+    tex->user = user;
+    tex->obj = t;
+    tex->texfunc = (color(*)(const void *, const void *, void *))(sampledtri_color);
+    t->tex = (texture *) tex;
+
+    return (object *) t;
+  }
+
+  return NULL; /* was a degenerate triangle */
+}
+
+
 void vcstri_normal_fixup(object *otri, int mode) {
   vcstri *t = (vcstri *) otri;
 
@@ -405,6 +454,40 @@ color vcstri_color(const vector * hit, const texture * tx, const ray * incident)
   col.r = W*tex->c0.r + U*tex->c1.r + V*tex->c2.r;
   col.g = W*tex->c0.g + U*tex->c1.g + V*tex->c2.g;
   col.b = W*tex->c0.b + U*tex->c1.b + V*tex->c2.b;
+
+  return col;
+}
+
+
+color sampledtri_color(const vector * hit, const texture * tx, const ray * incident) {
+  const sampledtri_texture * tex = (const sampledtri_texture *) tx;
+  const stri * trn = (const stri *) tex->obj;
+  flt U, V, W, lensqr;
+  vector P, tmp, norm;
+  float attr[4], rgb[3];
+  color col;
+  int i;
+  
+  CROSS(norm, trn->edge1, trn->edge2);
+  lensqr = DOT(norm, norm); 
+
+  VSUB((*hit), trn->v0, P);
+
+  CROSS(tmp, P, trn->edge2);
+  U = DOT(tmp, norm) / lensqr;   
+
+  CROSS(tmp, trn->edge1, P);
+  V = DOT(tmp, norm) / lensqr;   
+
+  W = 1.0 - (U + V);
+
+  for (i = 0; i < 4; i++)
+    attr[i] = (float) (W*tex->a0[i] + U*tex->a1[i] + V*tex->a2[i]);
+
+  tex->fn(tex->user, attr, rgb);
+  col.r = rgb[0];
+  col.g = rgb[1];
+  col.b = rgb[2];
 
   return col;
 }

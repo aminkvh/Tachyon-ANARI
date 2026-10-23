@@ -39,6 +39,9 @@ struct AttributeStyleBinder : public PrimStyleBinder
   float colorAlpha{1.f};
   Material::Scalars scalars{};
   int attr[3]{-1, -1, -1}; // opacity, metallic, roughness: attribute or -1
+  // opacity, metallic, roughness taken from a sampler (reading attribute
+  // attr[i], or the primitive index for a primitive sampler), or nullptr
+  const Sampler *sampler[3]{nullptr, nullptr, nullptr};
   std::unordered_map<unsigned, int> cache;
 
   static unsigned level(float v)
@@ -48,15 +51,22 @@ struct AttributeStyleBinder : public PrimStyleBinder
     return v >= 1.f ? kLevels : unsigned(std::lround(v * kLevels));
   }
 
-  int styleFor(const float4 *vals) override
+  int styleFor(const float4 *vals, size_t prim) override
   {
     Material::Scalars s = scalars;
     float *dst[3] = {&s.opacity, &s.metallic, &s.roughness};
     unsigned key = 0;
     for (int i = 0; i < 3; i++) {
-      if (attr[i] < 0)
+      float v;
+      if (sampler[i] && sampler[i]->isPrimitive())
+        v = sampler[i]->samplePrimitive(prim).x;
+      else if (sampler[i])
+        v = sampler[i]->sample(vals[attr[i]]).x;
+      else if (attr[i] >= 0)
+        v = vals[attr[i]].x;
+      else
         continue;
-      const unsigned l = level(vals[attr[i]].x);
+      const unsigned l = level(v);
       key |= l << (5 * i);
       *dst[i] = float(l) / kLevels;
     }
@@ -167,6 +177,7 @@ void Frame::rebuildScene(helium::TimeStamp sceneStamp)
     SurfaceStyle style;
     std::unique_ptr<PrimStyleBinder> binder;
     int colorAttr = -1;
+    const Sampler *colorSampler = nullptr; // maps the color attribute values
     float colorAlpha = 1.f;
 
     if (!m) { // like helide: show surfaces without a material in magenta
@@ -180,7 +191,41 @@ void Frame::rebuildScene(helium::TimeStamp sceneStamp)
         continue;
       }
       const int attr = m->colorAttribute();
-      if (attr >= 0) {
+      if (const Sampler *cs = m->colorSampler()) {
+        // sampled color: the sampler's input comes from the instance, the
+        // geometry's vertex/primitive/uniform attributes (in this order), or
+        // is the primitive index
+        const std::optional<float4> *uniform = nullptr;
+        if (cs->isPrimitive()) {
+          colorSampler = cs;
+        } else {
+          const int a = cs->inAttribute();
+          if (si.instAttr && (*si.instAttr)[a])
+            uniform = &(*si.instAttr)[a];
+          else {
+            switch (g->attributeSource(a)) {
+            case ColorSource::VERTEX:
+            case ColorSource::PRIMITIVE:
+              colorAttr = a;
+              colorSampler = cs;
+              break;
+            case ColorSource::UNIFORM:
+              uniform = &g->uniformAttribute(a);
+              break;
+            case ColorSource::NONE:
+              break;
+            }
+          }
+          if (!colorSampler) { // constant input: sample once
+            const float4 v = cs->sample(
+                uniform ? **uniform : helium::math::DEFAULT_ATTRIBUTE_VALUE);
+            style.color[0] = v.x;
+            style.color[1] = v.y;
+            style.color[2] = v.z;
+            colorAlpha = v.w;
+          }
+        }
+      } else if (attr >= 0) {
         // lookup order: instance attribute, then geometry vertex, primitive
         // and uniform attributes
         const std::optional<float4> *uniform = nullptr;
@@ -218,8 +263,43 @@ void Frame::rebuildScene(helium::TimeStamp sceneStamp)
           preview ? -1 : m->roughnessAttribute()};
       float *sval[3] = {&sc.opacity, &sc.metallic, &sc.roughness};
       int perPrim[3] = {-1, -1, -1};
+      const Sampler *perPrimSampler[3] = {nullptr, nullptr, nullptr};
+      bool primSampled = false;
       unsigned mask = 0;
       for (int i = 0; i < 3; i++) {
+        if (const Sampler *ss = preview ? nullptr : m->scalarSampler(i)) {
+          if (ss->isPrimitive()) {
+            perPrimSampler[i] = ss;
+            primSampled = true;
+            continue;
+          }
+          const int a = ss->inAttribute();
+          const std::optional<float4> *uniform = nullptr;
+          if (si.instAttr && (*si.instAttr)[a])
+            uniform = &(*si.instAttr)[a];
+          else {
+            switch (g->attributeSource(a)) {
+            case ColorSource::VERTEX:
+            case ColorSource::PRIMITIVE:
+              perPrim[i] = a;
+              perPrimSampler[i] = ss;
+              mask |= 1u << a;
+              primSampled = true;
+              break;
+            case ColorSource::UNIFORM:
+              uniform = &g->uniformAttribute(a);
+              break;
+            case ColorSource::NONE:
+              break;
+            }
+          }
+          if (!perPrimSampler[i]) {
+            *sval[i] = ss->sample(uniform ? **uniform
+                                          : helium::math::DEFAULT_ATTRIBUTE_VALUE)
+                           .x;
+          }
+          continue;
+        }
         const int a = sattr[i];
         if (a < 0)
           continue;
@@ -242,15 +322,17 @@ void Frame::rebuildScene(helium::TimeStamp sceneStamp)
         }
       }
 
-      if (mask) {
+      if (mask || primSampled) {
         auto b = std::make_unique<AttributeStyleBinder>();
         b->scene = &m_scene;
         b->material = m;
         b->baseStyle = style;
         b->colorAlpha = colorAlpha;
         b->scalars = sc;
-        for (int i = 0; i < 3; i++)
+        for (int i = 0; i < 3; i++) {
           b->attr[i] = perPrim[i];
+          b->sampler[i] = perPrimSampler[i];
+        }
         b->attrMask = mask;
         binder = std::move(b);
       } else if (!m->fillStyle(style, colorAlpha, &sc, preview)) {
@@ -259,11 +341,11 @@ void Frame::rebuildScene(helium::TimeStamp sceneStamp)
     }
 
     if (binder) {
-      g->emit(m_scene, -1, si.xfm, colorAttr, binder.get());
+      g->emit(m_scene, -1, si.xfm, colorAttr, binder.get(), colorSampler);
       continue;
     }
     const int id = m_scene.addStyle(style);
-    g->emit(m_scene, id, si.xfm, colorAttr, nullptr);
+    g->emit(m_scene, id, si.xfm, colorAttr, nullptr, colorSampler);
   }
 
   m_scene.finishBuild();

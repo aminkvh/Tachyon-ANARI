@@ -534,6 +534,16 @@ void * rt_texture_copy_vcstri(SceneHandle, void *oldtex);
  *  individually freed (bulk-freed with the scene). */
 void * rt_texture_copy_color(SceneHandle, void *oldtex, const float *rgb);
 
+/** Per-hit color function of a "sampled" triangle: maps the attribute value
+ *  attr[4] interpolated at the hit point to a color rgb[3]. 'user' is the
+ *  pointer given to rt_sampledtri3fv(). Called from the render threads, so it
+ *  must be thread safe. */
+typedef void (*rt_attrsample_fn)(const void * user, const float * attr,
+                                 float * rgb);
+/** Arena-allocated texture to be used by exactly one rt_sampledtri3fv()
+ *  triangle (copies the shading parameters of oldtex). */
+void * rt_texture_copy_sampled(SceneHandle, void *oldtex);
+
 
 /*****************************/
 /* Shading and lighting APIs */
@@ -746,7 +756,18 @@ void rt_vcstri(SceneHandle, void *tex, apivector v0, apivector v1, apivector v2,
 void rt_vcstri3fv(SceneHandle, void *tex, 
                   const float *v0, const float *v1, const float *v2,
                   const float *n0, const float *n1, const float *n2,
-                  const float *c0, const float *c1, const float *c2); 
+                  const float *c0, const float *c1, const float *c2);
+/**
+ * Define a smooth-shaded triangle whose color is computed per hit: the 4
+ * component vertex attributes attr[0..3], attr[4..7], attr[8..11] are
+ * interpolated barycentrically and passed to fn(). 'tex' must come from
+ * rt_texture_copy_sampled() and is used by this triangle only.
+ */
+void rt_sampledtri3fv(SceneHandle, void *tex,
+                      const float *v0, const float *v1, const float *v2,
+                      const float *n0, const float *n1, const float *n2,
+                      const float *attr, rt_attrsample_fn fn,
+                      const void *user);
 
 
 /**
@@ -1004,6 +1025,16 @@ typedef struct {
   color c1;           /**< color for vertex 1 */
   color c2;           /**< color for vertex 2 */
 } vcstri_texture;
+
+typedef struct {
+  RT_TEXTURE_HEAD
+  void * obj;         /**< the triangle this texture belongs to */
+  rt_attrsample_fn fn;/**< per-hit color function */
+  const void * user;  /**< first argument of fn */
+  float a0[4];        /**< attribute for vertex 0 */
+  float a1[4];        /**< attribute for vertex 1 */
+  float a2[4];        /**< attribute for vertex 2 */
+} sampledtri_texture;
 
 
 /*

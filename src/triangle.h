@@ -11,6 +11,10 @@ object * newvcstri(rt_bulkarena *, void *, vector, vector, vector, vector, vecto
                    color, color, color);
 void vcstri_normal_fixup(object *, int mode);
 color vcstri_color(const vector * hit, const texture * tex, const ray * incident);
+object * newsampledtri(rt_bulkarena *, void *, vector, vector, vector,
+                       vector, vector, vector, const float *attr,
+                       rt_attrsample_fn fn, const void * user);
+color sampledtri_color(const vector * hit, const texture * tex, const ray * incident);
 
 #ifdef TRIANGLE_PRIVATE
 

@@ -17,6 +17,7 @@ add_library(anari_library_tachyon SHARED
   Camera.cpp
   Geometry.cpp
   Material.cpp
+  Sampler.cpp
   Light.cpp
   World.cpp
   Renderer.cpp

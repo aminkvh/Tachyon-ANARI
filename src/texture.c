@@ -75,6 +75,13 @@ texture * new_vcstri_texture(rt_bulkarena * arena) {
   return (texture *) tex;
 }
 
+texture * new_sampledtri_texture(rt_bulkarena * arena) {
+  sampledtri_texture * tex;
+  tex = (sampledtri_texture *) rt_bulkarena_alloc(arena, sizeof(sampledtri_texture));
+  tex->methods = &vcstri_arena_methods;
+  return (texture *) tex;
+}
+
 void free_standard_texture(void * voidtex) {
   standard_texture * tex = (standard_texture *) voidtex;
   if (tex->img != NULL) {

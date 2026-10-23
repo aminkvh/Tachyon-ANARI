@@ -4,6 +4,7 @@
 #pragma once
 
 #include "Object.h"
+#include "Sampler.h"
 #include "TachyonScene.h"
 // std
 #include <array>
@@ -30,8 +31,9 @@ struct PrimStyleBinder
   virtual ~PrimStyleBinder() = default;
   unsigned attrMask{0}; // bit i: attribute i (4 = color) is needed
   // 'vals[i]': value of attribute i for the primitive (only valid for bits in
-  // attrMask). Returns a style id, or < 0 when the primitive is invisible.
-  virtual int styleFor(const float4 *vals) = 0;
+  // attrMask), 'prim': index of the primitive. Returns a style id, or < 0 when
+  // the primitive is invisible.
+  virtual int styleFor(const float4 *vals, size_t prim) = 0;
 };
 
 struct Geometry : public Object
@@ -61,8 +63,15 @@ struct Geometry : public Object
   // colors (see attributeSource()); < 0: no per-primitive colors.
   // 'binder' (may be nullptr): picks the style of each primitive instead of
   // using 'style' for all of them.
-  virtual void emit(
-      TachyonScene &, int, const mat4 &, int, PrimStyleBinder *) const
+  // 'colorSampler' (may be nullptr): maps the values of 'colorAttr' (or, for a
+  // primitive sampler, the primitive index; then 'colorAttr' is < 0) to the
+  // colors.
+  virtual void emit(TachyonScene &,
+      int,
+      const mat4 &,
+      int,
+      PrimStyleBinder *,
+      const Sampler *) const
   {}
   virtual bool bounds(const mat4 &, float3 &, float3 &) const { return false; }
 
@@ -83,7 +92,8 @@ struct Triangle : public Geometry
       int style,
       const mat4 &xfm,
       int colorAttr,
-      PrimStyleBinder *binder) const override;
+      PrimStyleBinder *binder,
+      const Sampler *colorSampler) const override;
   bool bounds(const mat4 &xfm, float3 &lo, float3 &hi) const override;
 
  private:
@@ -133,7 +143,8 @@ struct Sphere : public AttributedGeometry
       int style,
       const mat4 &xfm,
       int colorAttr,
-      PrimStyleBinder *binder) const override;
+      PrimStyleBinder *binder,
+      const Sampler *colorSampler) const override;
   bool bounds(const mat4 &xfm, float3 &lo, float3 &hi) const override;
 
  private:
@@ -153,7 +164,8 @@ struct Cylinder : public AttributedGeometry
       int style,
       const mat4 &xfm,
       int colorAttr,
-      PrimStyleBinder *binder) const override;
+      PrimStyleBinder *binder,
+      const Sampler *colorSampler) const override;
   bool bounds(const mat4 &xfm, float3 &lo, float3 &hi) const override;
 
  private:

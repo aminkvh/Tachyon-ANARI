@@ -10,6 +10,7 @@
 #include "Light.h"
 #include "Material.h"
 #include "Renderer.h"
+#include "Sampler.h"
 #include "World.h"
 // helium
 #include "helium/array/Array1D.h"
@@ -186,8 +187,10 @@ ANARIRenderer TachyonDevice::newRenderer(const char *subtype)
 ANARISampler TachyonDevice::newSampler(const char *subtype)
 {
   initDevice();
+  if (auto *s = Sampler::createInstance(subtype, deviceState()))
+    return (ANARISampler)s;
   return (ANARISampler)warnUnsupported(
-      new UnsupportedObject(ANARI_SAMPLER, deviceState()), "sampler", subtype);
+      new UnsupportedSampler(deviceState()), "sampler", subtype);
 }
 
 ANARISpatialField TachyonDevice::newSpatialField(const char *subtype)

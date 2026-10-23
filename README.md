@@ -22,6 +22,7 @@ Tachyon can also be used as a [Khronos ANARI](https://www.khronos.org/anari) ren
 - triangles, spheres and cylinders (large sphere sets are stored compactly with their own BVH)
 - perspective and orthographic cameras
 - `matte` materials, plus `physicallyBased` (approximated); color, opacity, metallic and roughness can come from attributes
+- image (1D, 2D, 3D), transform and primitive samplers for colors (colors are looked up for every hit on triangles; opacity, metallic and roughness are looked up once per primitive)
 - directional and point lights
 - color and depth output
 - a renderer `mode` parameter: `default` (scene lights and shadows) or `eyeLight` (fast preview that ignores lights)

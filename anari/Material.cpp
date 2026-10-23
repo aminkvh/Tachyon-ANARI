@@ -48,6 +48,9 @@ void Material::commitParameters()
   m_opacityAttribute = readAttributeName("opacity");
   m_metallicAttribute = -1;
   m_roughnessAttribute = -1;
+  m_scalarSampler[0] = getParamObject<Sampler>("opacity");
+  m_scalarSampler[1] = getParamObject<Sampler>("metallic");
+  m_scalarSampler[2] = getParamObject<Sampler>("roughness");
 }
 
 void Material::readCommon(const char *colorName)
@@ -75,17 +78,14 @@ void Material::readCommon(const char *colorName)
         "color attribute '%s' not supported, using constant color",
         attr.c_str());
   }
-  if (getParamObject<Object>(colorName)) {
-    reportMessage(ANARI_SEVERITY_WARNING,
-        "samplers are not supported, using constant color");
-  }
+  m_colorSampler = getParamObject<Sampler>(colorName);
 }
 
 bool Material::fillStyle(
     SurfaceStyle &s, float colorAlpha, const Scalars *sc, bool preview) const
 {
   const Scalars v = sc ? *sc : scalars();
-  if (m_colorAttribute < 0) {
+  if (m_colorAttribute < 0 && !colorSampler()) {
     s.color[0] = m_color.x;
     s.color[1] = m_color.y;
     s.color[2] = m_color.z;
